@@ -1,2 +1,4 @@
 fastapi
-uvicorn
+uvicorn  # for local development
+pydantic
+akshare==1.10.43
