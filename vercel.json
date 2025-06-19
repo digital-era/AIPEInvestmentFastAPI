@@ -11,10 +11,4 @@
       "dest": "api/query.py"
     }
   ]
-    "crons": [
-    {
-      "path": "/api/daily_task",
-      "schedule": "0 18-24 * * 1-5"
-    }
-  ]
 }
