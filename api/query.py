@@ -41,26 +41,27 @@ async def get_stock_data(
     """
     if query_type == 'price':
         try:
-            # 方案1：使用新浪财经接口（快速）
+            # 方案1：使用新浪财经接口（快速）->修改为雪球接口
             try:
                 market_code = get_stock_market_code(code)
-                df = ak.stock_zh_a_spot_sina(symbol=market_code)
+                #df = ak.stock_zh_a_spot_sina(symbol=market_code)
+                df = ak.stock_individual_spot_xq(symbol=market_code)
                 
                 # 提取数据并处理百分比
-                change_percent_str = df.at[0, '涨跌幅']
+                change_percent_str = df#.at[0, '涨幅']
                 change_percent = float(change_percent_str.strip('%'))
                 
                 data = {
                     "name": df.at[0, '名称'],
-                    "latestPrice": float(df.at[0, '最新价']),
+                    "latestPrice": float(df.at[0, '现价']),
                     "changePercent": change_percent,
-                    "changeAmount": float(df.at[0, '涨跌额'])
+                    "changeAmount": float(df.at[0, '涨跌'])
                 }
                 return PriceResponse(**data)
                 
-            except Exception as sina_error:
-                print(f"Sina interface failed, trying alternative: {sina_error}")
-                
+            except Exception as method1_error:
+                print(f" method1 interface failed, trying alternative: {method1_error}")
+                """
                 # 方案2：备用接口（腾讯财经）
                 try:
                     df = ak.stock_zh_a_spot_em()
@@ -83,6 +84,7 @@ async def get_stock_data(
                 except Exception as em_error:
                     print(f"EM interface failed: {em_error}")
                     raise
+                """
 
         except Exception as e:
             if isinstance(e, HTTPException):
