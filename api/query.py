@@ -48,14 +48,15 @@ async def get_stock_data(
                 df = ak.stock_individual_spot_xq(symbol=market_code)
                 
                 # 提取数据并处理百分比
-                change_percent_str = df#.at[0, '涨幅']
-                change_percent = float(change_percent_str.strip('%'))
+                change_percent = = df.loc[df['item'] == '涨幅', 'value'].iloc[0]
+               
+                #change_percent = float(change_percent_str.strip('%'))
                 
                 data = {
-                    "name": df.at[0, '名称'],
-                    "latestPrice": float(df.at[0, '现价']),
-                    "changePercent": change_percent,
-                    "changeAmount": float(df.at[0, '涨跌'])
+                        "name": df.loc[df['item'] == '名称', 'value'].iloc[0],
+                        "latestPrice": float(df.loc[df['item'] == '现价', 'value'].iloc[0]),
+                        "changePercent": change_percent,
+                        "changeAmount": float(df.loc[df['item'] == '涨跌', 'value'].iloc[0])
                 }
                 return PriceResponse(**data)
                 
