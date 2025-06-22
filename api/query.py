@@ -112,11 +112,23 @@ async def get_stock_data(
                     indicator_df = indicator_df.sort_values('报告日期', ascending=False)
                     roe_row = indicator_df[indicator_df['报告日期'].str.contains('1231')].iloc[0]
                     roe = roe_row['净资产收益率']
-            except Exception:
-                # 忽略ROE获取错误
-                pass
+                    roe_source = "年报"
+            except Exception as e:
+                # 如果获取失败，尝试使用PB和PE估算ROE
+                if pe is not None and pb is not None and pe > 0:
+                    roe = pb * 100 / pe  # 使用公式 ROE = PB × 100 / PE
+                    roe_source = "估算"
+                    print(f"使用估算方法获取ROE: PB={pb}, PE={pe} => ROE={roe}")
+                else:
+                    print(f"无法估算ROE: PB={pb}, PE={pe}")
             
-            return InfoResponse(pe=pe, pb=pb, roe=roe)
+            # 如果年报获取成功但值为空，也尝试估算
+            if roe is None and pe is not None and pb is not None and pe > 0:
+                roe = pb * 100 / pe
+                roe_source = "估算"
+                print(f"年报ROE为空，使用估算方法: PB={pb}, PE={pe} => ROE={roe}")
+            
+            return InfoResponse(pe=pe, pb=pb, roe=roe, roe_source=roe_source)
             
         except Exception as e:
             print(f"Info query error for {code}: {str(e)}")
