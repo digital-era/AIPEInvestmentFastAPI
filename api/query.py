@@ -87,30 +87,43 @@ async def get_stock_data(
 
     elif query_type == 'info':
         try:
-            financial_df = ak.stock_financial_analysis_indicator(symbol=market_code)
+            # 方案1：使用实时接口获取PE/PB
+            spot_df = ak.stock_individual_spot_xq(symbol=market_code)
             
-            if financial_df.empty:
-                raise HTTPException(status_code=404, detail=f"Financial data for stock code '{code}' not found.")
-
-            latest_data = financial_df.iloc[0]
+            # 辅助函数提取实时指标
+            def get_spot_value(item_name: str):
+                try:
+                    value = spot_df.loc[spot_df['item'] == item_name, 'value'].iloc[0]
+                    return float(value) if value != '--' else None
+                except (IndexError, ValueError, TypeError):
+                    return None
             
-            # 准备数据，使用 .get() 方法安全访问，以防列名变动
-            raw_data = {
-                "pe": latest_data.get('市盈率(TTM)'),
-                "pb": latest_data.get('市净率', latest_data.get('市净率(MRQ)')),
-                "roe": latest_data.get('净资产收益率(摊薄)')
-            }
+            # 获取实时PE/PB
+            pe = get_spot_value('市盈率(TTM)')
+            pb = get_spot_value('市净率')
             
-            # 清理数据（处理 pandas 的 <NA> 或 numpy 的 NaN）
-            clean_data = {k: (float(v) if pd.notna(v) else None) for k, v in raw_data.items()}
+            # 方案2：获取最新年报ROE
+            roe = None
+            try:
+                # 使用基本面接口获取ROE
+                indicator_df = ak.stock_financial_analysis_indicator(symbol=code)
+                if not indicator_df.empty:
+                    # 按报告期排序并取最新年报
+                    indicator_df = indicator_df.sort_values('报告日期', ascending=False)
+                    roe_row = indicator_df[indicator_df['报告日期'].str.contains('1231')].iloc[0]
+                    roe = roe_row['净资产收益率']
+            except Exception:
+                # 忽略ROE获取错误
+                pass
             
-            return InfoResponse(**clean_data)
+            return InfoResponse(pe=pe, pb=pb, roe=roe)
             
         except Exception as e:
-            if isinstance(e, HTTPException):
-                raise e # 如果是已经处理过的 HTTPException，直接重新抛出
-            print(f"Error processing info request for {code}: {e}")
-            raise HTTPException(status_code=502, detail=f"Internal error fetching financial info: {str(e)}")
+            print(f"Info query error for {code}: {str(e)}")
+            raise HTTPException(
+                status_code=502, 
+                detail=f"Financial data query failed: {str(e)}"
+            )
             
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
