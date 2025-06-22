@@ -123,7 +123,8 @@ async def get_stock_data(
                     print(f"无法估算ROE: PB={pb}, PE={pe}")
             
             # 如果年报获取成功但值为空，也尝试估算
-            if roe is None and pe is not None and pb is not None and pe > 0:
+            ##if roe is None and pe is not None and pb is not None and pe > 0:
+            if roe is None and pe is not None and pb is not None:
                 roe = pb  / pe
                 roe_source = "估算"
                 print(f"年报ROE为空，使用估算方法: PB={pb}, PE={pe} => ROE={roe}")
