@@ -115,7 +115,8 @@ async def get_stock_data(
                     roe_source = "年报"
             except Exception as e:
                 # 如果获取失败，尝试使用PB和PE估算ROE
-                if pe is not None and pb is not None and pe > 0:
+                ##if pe is not None and pb is not None and pe > 0:
+                if pe is not None and pb is not None:
                     roe = pb  / pe  # 使用公式 ROE = PB × 100 / PE
                     roe_source = "估算"
                     print(f"使用估算方法获取ROE: PB={pb}, PE={pe} => ROE={roe}")
