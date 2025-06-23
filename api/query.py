@@ -31,10 +31,10 @@ def get_yfinance_ticker(code: str) -> str:
     """将股票代码转换为yfinance可识别的格式"""
     # 港股处理（格式如: HK02899, hk00005, HK03690）
     if code.upper().startswith('HK'):
-        # 提取数字部分，移除前导零，并添加 .HK 后缀
-        num_part = code[2:].lstrip('0')  # 移除开头的所有零
-        if not num_part:  # 如果所有数字都是零（如HK00000）
-            num_part = "0"
+        # 提取数字部分，最多只移除开头的1个零
+        num_part = code[2:]
+        if num_part.startswith('0') and len(num_part) > 1:
+            num_part = num_part[1:]  # 只移除开头的第一个零
         return f"{num_part}.HK"
     
     # A股处理
