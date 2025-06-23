@@ -29,6 +29,15 @@ class InfoResponse(BaseModel):
 # --- Helper Function ---
 def get_yfinance_ticker(code: str) -> str:
     """将股票代码转换为yfinance可识别的格式"""
+    # 港股处理（格式如: HK02899, hk00005, HK03690）
+    if code.upper().startswith('HK'):
+        # 提取数字部分，移除前导零，并添加 .HK 后缀
+        num_part = code[2:].lstrip('0')  # 移除开头的所有零
+        if not num_part:  # 如果所有数字都是零（如HK00000）
+            num_part = "0"
+        return f"{num_part}.HK"
+    
+    # A股处理
     if code.startswith(('60', '68', '900')):  # 沪市
         return f"{code}.SS"
     elif code.startswith(('00', '30', '200')):  # 深市
@@ -36,6 +45,7 @@ def get_yfinance_ticker(code: str) -> str:
     elif code.startswith(('43', '83', '87', '88')):  # 北交所
         return f"{code}.BJ"
     else:  # 美股及其他市场
+        # 美股处理（如 AAPL, MSFT）
         return code
 
 def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
