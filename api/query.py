@@ -43,13 +43,10 @@ def get_yfinance_ticker(code: str) -> str:
         if num_part.startswith('0') and len(num_part) > 1:
             num_part = num_part[1:]  # 只移除开头的第一个零
         return f"{num_part}.HK"
-    elif code.upper().startswith('ETF'):  # ETF
-        # 提取数字部分，最多只移除开头的ETF
-        num_part = code[3:]
-        if num_part.startswith('5') and len(num_part) == 6:
-            return f"{num_part}.SS"
-        elif num_part.startswith('15') and len(num_part) == 6:
-            return f"{num_part}.SZ"
+    elif code.upper().startswith('US'):  # 美股
+        # 提取数字部分，最多只移除开头的US
+        code_part = code[2:]
+            return f"{code_part}"
     
     # A股处理
     if code.startswith(('60', '68', '900')):  # 沪市
