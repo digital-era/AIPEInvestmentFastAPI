@@ -118,8 +118,13 @@ def fetch_financial_info_with_yfinance(code: str) -> Optional[InfoResponse]:
         
         # ROE转换为百分比形式（如果存在）
         if roe is not None:
-            roe = roe * 100  # 转换为百分比
-        
+            roe = roe   # 转换为百分比
+
+        # 如果获取失败，尝试使用PB和PE估算ROE
+        if pe is not None and pb is not None and pe != 0:            
+            roe = (pb / pe) * 100  # ROE = PB/PE * 100
+            print(f"Using estimated ROE: {roe}")
+
         return InfoResponse(
             pe=pe,
             pb=pb,
