@@ -51,6 +51,10 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{code}.SZ"
     elif code.startswith(('43', '83', '87', '88')):  # 北交所
         return f"{code}.BJ"
+    elif code.startswith(('58', '55', '51')):  # 上证ETF
+        return f"{code}.SS"
+    elif code.startswith(('15')):  # 上证ETF
+        return f"{code}.SZ"
     else:  # 美股及其他市场
         # 美股处理（如 AAPL, MSFT）
         return code
@@ -68,7 +72,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         # 获取基本信息
         info = ticker.info
         
-        if (code.upper().startswith('ETF')==False):  # ETF
+        if (code.upper().startswith('58')==False) and (code.upper().startswith('56')==False) and (code.upper().startswith('51')==False) and (code.upper().startswith('15')==False):  # ETF
           # 优先使用currentPrice获取实时价格
           current_price = info.get('currentPrice')
           
@@ -183,4 +187,3 @@ async def get_stock_data(
             
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
-
