@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 import yfinance as yf
-from typing import Optional
+from typing import Optional, List
 import time
+import datetime
 
 app = FastAPI(
     title="Stock Query API",
@@ -10,6 +11,11 @@ app = FastAPI(
 )
 
 # --- Pydantic Models ---
+class DailyData(BaseModel):
+    date: str
+    change: str
+    price: float
+
 class PriceResponse(BaseModel):
     name: str
     latest_price: float = Field(..., alias='latestPrice')
@@ -17,6 +23,7 @@ class PriceResponse(BaseModel):
     change_amount: float = Field(..., alias='changeAmount')
     source: str = Field(..., description="Data source (yfinance)")
     currency: str = Field(..., description="Currency of the stock")
+    dailydata: Optional[List[DailyData]] = Field(None, description="Recent 5 trading days data for ETFs")
     class Config:
         validate_by_name = True  # 修正为正确配置项
 
@@ -53,7 +60,7 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{code}.BJ"
     elif code.startswith(('58', '55', '51')):  # 上证ETF
         return f"{code}.SS"
-    elif code.startswith(('15')):  # 上证ETF
+    elif code.startswith(('15')):  # 深证ETF
         return f"{code}.SZ"
     else:  # 美股及其他市场
         # 美股处理（如 AAPL, MSFT）
@@ -72,13 +79,12 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         # 获取基本信息
         info = ticker.info
         
-        if (code.upper().startswith('58')==False) and (code.upper().startswith('56')==False) and (code.upper().startswith('51')==False) and (code.upper().startswith('15')==False):  # ETF
-          # 优先使用currentPrice获取实时价格
-          current_price = info.get('currentPrice')
-          
-          # 如果currentPrice不可用，尝试使用regularMarketPrice
-          if current_price is None:
-              current_price = info.get('regularMarketPrice')
+        # 优先使用currentPrice获取实时价格
+        current_price = info.get('currentPrice')
+        
+        # 如果currentPrice不可用，尝试使用regularMarketPrice
+        if current_price is None:
+            current_price = info.get('regularMarketPrice')
 
         # 如果仍然不可用，尝试从历史数据中获取最新价格
         if current_price is None:
@@ -97,6 +103,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         
         # 如果无法获取前一天收盘价，尝试从历史数据中提取
         if prev_close is None:
+            print("prev_close is None")
             hist = ticker.history(period="2d")
             if len(hist) >= 2:
                 prev_close = hist['Close'].iloc[-2]
@@ -112,13 +119,49 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         name = info.get('shortName', info.get('longName', code))
         currency = info.get('currency', 'USD')
         
+        # 检查是否为ETF
+        is_etf = (
+            code.upper().startswith('58') or 
+            code.upper().startswith('56') or 
+            code.upper().startswith('51') or 
+            code.upper().startswith('15')
+        )
+        
+        daily_data = []
+        if is_etf:
+            # 获取最近5个交易日的ETF数据
+            print(f"Fetching 5-day ETF data for {ticker_symbol}")
+            data = ticker.history(period="5d")
+            
+            if not data.empty:
+                # 按日期降序排序（最新日期在前）
+                data = data.sort_index(ascending=False)
+                
+                # 准备每日数据
+                for i, (date, row) in enumerate(data.iterrows()):
+                    # 计算涨跌额（与前一天比较）
+                    if i == 0:  # 最新一天
+                        daily_change = row['Close'] - prev_close
+                    elif i < len(data) - 1:  # 中间日期
+                        daily_change = row['Close'] - data.iloc[i+1]['Close']
+                    else:  # 最早一天
+                        daily_change = 0.0
+                    
+                    date_str = date.strftime('%Y-%m-%d')
+                    daily_data.append({
+                        "date": date_str,
+                        "change": f"{daily_change:.2f}",
+                        "price": row['Close']
+                    })
+        
         return PriceResponse(
             name=name,
             latestPrice=current_price,
             changePercent=change_percent,
             changeAmount=change_amount,
             source="yfinance",
-            currency=currency
+            currency=currency,
+            dailydata=daily_data if is_etf else None
         )
     
     except Exception as e:
