@@ -36,6 +36,13 @@ def get_yfinance_ticker(code: str) -> str:
         if num_part.startswith('0') and len(num_part) > 1:
             num_part = num_part[1:]  # 只移除开头的第一个零
         return f"{num_part}.HK"
+    elif code.upper().startswith('ETF'):  # ETF
+        # 提取数字部分，最多只移除开头的ETF
+        num_part = code[3:]
+        if num_part.startswith('5') and len(num_part) == 6:
+            return f"{num_part}.SS"
+        elif num_part.startswith('15') and len(num_part) == 6:
+            return f"{num_part}.SZ"
     
     # A股处理
     if code.startswith(('60', '68', '900')):  # 沪市
@@ -54,20 +61,21 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         ticker_symbol = get_yfinance_ticker(code)
         print(f"Fetching price data with yfinance for {ticker_symbol}")
         ticker = yf.Ticker(ticker_symbol)
-        
+        current_price = None
         # 等待一小段时间确保数据加载
         time.sleep(0.2)
         
         # 获取基本信息
         info = ticker.info
         
-        # 优先使用currentPrice获取实时价格
-        current_price = info.get('currentPrice')
-        
-        # 如果currentPrice不可用，尝试使用regularMarketPrice
-        if current_price is None:
-            current_price = info.get('regularMarketPrice')
-        
+        if (code.upper().startswith('ETF')==False):  # ETF
+          # 优先使用currentPrice获取实时价格
+          current_price = info.get('currentPrice')
+          
+          # 如果currentPrice不可用，尝试使用regularMarketPrice
+          if current_price is None:
+              current_price = info.get('regularMarketPrice')
+
         # 如果仍然不可用，尝试从历史数据中获取最新价格
         if current_price is None:
             print("Falling back to historical data for current price")
@@ -175,3 +183,4 @@ async def get_stock_data(
             
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
+
