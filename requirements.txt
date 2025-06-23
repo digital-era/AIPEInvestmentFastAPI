@@ -1,5 +1,6 @@
-fastapi
-uvicorn  # for local development
-pydantic
-akshare
 yfinance
+akshare
+fastapi
+pandas
+python-multipart
+mangum
