@@ -232,20 +232,3 @@ async def get_stock_data(
             
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
-
-import asyncio
-# 获取当前事件循环
-loop = asyncio.get_event_loop()
-
-# 创建任务并等待完成
-task = loop.create_task(get_stock_data("600900", "price"))
-rsp = await task  # 在 Jupyter cell 中使用 "await"
-
-# 打印结果
-print("直接打印:", rsp)
-print("\n字典形式:", rsp.model_dump(by_alias=True))
-
-# 打印所有字段
-print("\n所有字段:")
-for field, value in rsp.model_dump(by_alias=True).items():
-    print(f"{field}: {value}")
