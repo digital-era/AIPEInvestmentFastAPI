@@ -3,13 +3,8 @@ from pydantic import BaseModel, Field
 import akshare as ak
 import pandas as pd
 import yfinance as yf
-import logging
 from typing import Optional
 import time
-
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Stock Query API",
@@ -25,7 +20,7 @@ class PriceResponse(BaseModel):
     source: str = Field(..., description="Data source (yfinance or akshare)")
     currency: str = Field(..., description="Currency of the stock")
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 class InfoResponse(BaseModel):
     pe: float | None = Field(None, description="Price-to-Earnings Ratio (TTM)")
@@ -84,7 +79,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         
         # 如果所有方法都无法获取价格，返回None
         if current_price is None:
-            logger.warning(f"No price data available from yfinance for {ticker_symbol}")
+            print(f"No price data available from yfinance for {ticker_symbol}")
             return None
         
         # 获取前一天收盘价
@@ -120,7 +115,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         )
     
     except Exception as e:
-        logger.error(f"yfinance error for {code}: {str(e)}")
+        print(f"yfinance error for {code}: {str(e)}")
         return None
 
 def fetch_price_with_akshare(code: str, market_code: str) -> PriceResponse:
@@ -152,7 +147,7 @@ def fetch_price_with_akshare(code: str, market_code: str) -> PriceResponse:
         return PriceResponse(**data)
         
     except Exception as e:
-        logger.error(f"akshare error for {code}: {str(e)}")
+        print(f"akshare error for {code}: {str(e)}")
         raise HTTPException(
             status_code=502, 
             detail=f"Failed to fetch data from akshare: {str(e)}"
@@ -174,7 +169,7 @@ async def get_stock_data(
             return yfinance_response
         
         # 如果yfinance失败，则尝试使用akshare（仅适用于A股）
-        logger.info(f"Falling back to akshare for {code}")
+        print(f"Falling back to akshare for {code}")
         try:
             market_code = get_stock_market_code(code)
             return fetch_price_with_akshare(code, market_code)
@@ -220,16 +215,16 @@ async def get_stock_data(
                     roe_row = indicator_df[indicator_df['报告日期'].str.contains('1231')].iloc[0]
                     roe = roe_row['净资产收益率']
             except Exception as e:
-                logger.warning(f"ROE extraction failed: {str(e)}")
+                print(f"ROE extraction failed: {str(e)}")
                 # 如果获取失败，尝试使用PB和PE估算ROE
                 if pe is not None and pb is not None and pe != 0:
                     roe = (pb / pe) * 100  # ROE = PB/PE * 100
-                    logger.info(f"Using estimated ROE: {roe}")
+                    print(f"Using estimated ROE: {roe}")
             
             return InfoResponse(pe=pe, pb=pb, roe=roe, source="akshare")
             
         except Exception as e:
-            logger.error(f"Info query error for {code}: {str(e)}")
+            print(f"Info query error for {code}: {str(e)}")
             raise HTTPException(
                 status_code=502, 
                 detail=f"Financial data query failed: {str(e)}"
@@ -237,3 +232,20 @@ async def get_stock_data(
             
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
+
+import asyncio
+# 获取当前事件循环
+loop = asyncio.get_event_loop()
+
+# 创建任务并等待完成
+task = loop.create_task(get_stock_data("600900", "price"))
+rsp = await task  # 在 Jupyter cell 中使用 "await"
+
+# 打印结果
+print("直接打印:", rsp)
+print("\n字典形式:", rsp.model_dump(by_alias=True))
+
+# 打印所有字段
+print("\n所有字段:")
+for field, value in rsp.model_dump(by_alias=True).items():
+    print(f"{field}: {value}")
