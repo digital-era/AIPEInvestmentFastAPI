@@ -123,9 +123,13 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
             code.upper().startswith('51') or 
             code.upper().startswith('15')
         )
+        # 检查是否为USD
+        is_usd = (
+            code.upper().startswith('US') 
+        )
         
         daily_data = []
-        if is_etf:
+        if is_etf or is_usd:
             # 获取最近5个交易日的ETF数据
             print(f"Fetching 5-day ETF data for {ticker_symbol}")
             data = ticker.history(period="5d")
