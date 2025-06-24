@@ -45,7 +45,7 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{num_part}.HK"
     elif code.upper().startswith('US'):  # 美股
         # 提取数字部分，最多只移除开头的US
-        code_part = code[3:]
+        code_part = code[2:]
         return f"{code_part}"
     
     # A股处理
