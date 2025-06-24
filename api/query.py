@@ -45,7 +45,7 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{num_part}.HK"
     elif code.upper().startswith('US'):  # 美股
         # 提取数字部分，最多只移除开头的US
-        code_part = code[2:]
+        code_part = code[3:]
         return f"{code_part}"
     
     # A股处理
@@ -59,8 +59,7 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{code}.SS"
     elif code.startswith(('15')):  # 深证ETF
         return f"{code}.SZ"
-    else:  # 美股及其他市场
-        # 美股处理（如 AAPL, MSFT）
+    else:  # 其他市场
         return code
 
 def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
