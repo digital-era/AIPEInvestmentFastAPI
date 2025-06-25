@@ -141,9 +141,9 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
                 for i, (date, row) in enumerate(data.iterrows()):
                     # 计算涨跌额（与前一天比较）
                     if i == 0:  # 最新一天
-                        daily_change = row['Close'] - prev_close
+                        daily_change = ((row['Close'] - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
                     elif i < len(data) - 1:  # 中间日期
-                        daily_change = row['Close'] - data.iloc[i+1]['Close']
+                        daily_change = ((row['Close'] - data.iloc[i+1]['Close']) / data.iloc[i+1]['Close']) * 100 if data.iloc[i+1]['Close'] != 0 else 0.0
                     else:  # 最早一天
                         daily_change = 0.0
                     
