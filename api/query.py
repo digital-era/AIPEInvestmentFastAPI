@@ -4,6 +4,8 @@ import yfinance as yf
 from typing import Optional, List
 import time
 import datetime
+import json
+from pandas.io.json import dumps as pandas_dumps
 
 app = FastAPI(
     title="Stock Query API",
@@ -227,6 +229,33 @@ async def get_stock_data(
                 status_code=404, 
                 detail=f"Financial info not found for {code}"
             )
+
+       # --- 新的数据接口分支 ---
+    elif query_type == 'movingaveragedata':
+        # 在这里实现获取和处理数据的逻辑，但不绘图
+        try:
+            ticker_symbol = get_yfinance_ticker(code)
+            ticker = yf.Ticker(ticker_symbol)
+            hist_data = ticker.history(period="2y", auto_adjust=False, back_adjust=True)
+            if hist_data.empty:
+                raise HTTPException(status_code=404, detail="No historical data found")
+
+            ma_periods = [5, 10, 20, 30, 60, 120, 250]
+            for period in ma_periods:
+                hist_data[f'MA_{period}'] = hist_data['Close'].rolling(window=period).mean()
+
+            plot_data = hist_data.tail(252).copy()
             
+            # 将 DataFrame 转换为 JSON，同时处理日期索引
+            # reset_index() 将日期从索引变为普通列
+            json_output = plot_data.reset_index().to_json(orient='records', date_format='iso')
+            
+            # 直接返回JSON响应
+            return Response(content=json_output, media_type="application/json")
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
