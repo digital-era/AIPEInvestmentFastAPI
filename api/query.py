@@ -5,7 +5,6 @@ from typing import Optional, List
 import time
 import datetime
 import json
-from pandas.io.json import dumps as pandas_dumps
 
 app = FastAPI(
     title="Stock Query API",
