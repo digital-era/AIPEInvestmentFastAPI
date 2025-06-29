@@ -5,13 +5,14 @@ from typing import Optional, List
 import time
 import datetime
 import json
+import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 
 app = FastAPI(
     title="Stock Query API",
     description="An API to fetch real-time price and financial info for stocks using yfinance."
 )
 
-# --- Pydantic Models ---
+# --- Pydantic Models (完全保持原始状态) ---
 class DailyData(BaseModel):
     date: str
     change: str
@@ -26,7 +27,7 @@ class PriceResponse(BaseModel):
     currency: str = Field(..., description="Currency of the stock")
     dailydata: Optional[List[DailyData]] = Field(None, description="Recent 5 trading days data for ETFs")
     class Config:
-        validate_by_name = True  # 修正为正确配置项
+        validate_by_name = True  # 保持您原始的配置
 
 class InfoResponse(BaseModel):
     pe: float | None = Field(None, description="Price-to-Earnings Ratio (TTM)")
@@ -34,7 +35,7 @@ class InfoResponse(BaseModel):
     roe: float | None = Field(None, description="Return on Equity")
     source: str = Field(..., description="Data source (yfinance)")
 
-# --- Helper Function ---
+# --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
     """将股票代码转换为yfinance可识别的格式"""
     # 港股处理（格式如: HK02899, hk00005, HK03690）
@@ -200,11 +201,11 @@ def fetch_financial_info_with_yfinance(code: str) -> Optional[InfoResponse]:
         print(f"yfinance error for financial info {code}: {str(e)}")
         return None
 
-# --- API Endpoint ---
+# --- API Endpoint (修改处) ---
 @app.get("/api/query")
 async def get_stock_data(
     code: str = Query(..., description="The stock code, e.g., '600900' or 'AAPL'"),
-    query_type: str = Query(..., alias="type", description="Type of query: 'price' or 'info'")
+    query_type: str = Query(..., alias="type", description="Type of query: 'price', 'info', 'movingaveragedata', or 'intraday'")
 ):
     """
     Fetches stock data based on the code and query type using yfinance.
@@ -229,7 +230,6 @@ async def get_stock_data(
                 detail=f"Financial info not found for {code}"
             )
 
-       # --- 新的数据接口分支 ---
     elif query_type == 'movingaveragedata':
         # 在这里实现获取和处理数据的逻辑，但不绘图
         try:
@@ -255,6 +255,46 @@ async def get_stock_data(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ==============================================================================
+    # >>>>>>>>>>>>>>>>>>>>   唯一新增的分支逻辑，完全独立   <<<<<<<<<<<<<<<<<<<<<<<<<<<
+    # ==============================================================================
+    elif query_type == 'intraday':
+        try:
+            ticker_symbol = get_yfinance_ticker(code)
+            ticker = yf.Ticker(ticker_symbol)
+
+            # 获取最近一个交易日的1分钟数据 (auto_adjust=False保留Volume列)
+            intraday_data = ticker.history(period="1d", interval="1m", auto_adjust=False)
+
+            if intraday_data.empty:
+                raise HTTPException(status_code=404, detail=f"No intraday data found for {code}. It might be a non-trading day.")
+
+            # 计算累计均价 (VWAP)
+            intraday_data['PriceVolume'] = intraday_data['Close'] * intraday_data['Volume']
+            intraday_data['CumulativeVolume'] = intraday_data['Volume'].cumsum()
+            intraday_data['CumulativePriceVolume'] = intraday_data['PriceVolume'].cumsum()
+            intraday_data['avg_price'] = intraday_data['CumulativePriceVolume'] / intraday_data['CumulativeVolume']
+
+            # 准备返回给前端的数据
+            intraday_data['time'] = intraday_data.index.strftime('%H:%M:%S')
+            result_df = intraday_data[['time', 'Close', 'avg_price', 'Volume']].rename(columns={
+                'Close': 'price',
+                'Volume': 'volume'
+            })
+            
+            # 填充可能出现的 NaN 值
+            result_df = result_df.fillna(method='ffill')
+            
+            # 转换为前端所需的JSON格式
+            json_output = result_df.to_json(orient='records')
+            
+            return Response(content=json_output, media_type="application/json")
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    # ==============================================================================
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>     新增逻辑结束     <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    # ==============================================================================
 
     else:
-        raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price' or 'info'.")
+        raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price', 'info', 'movingaveragedata', or 'intraday'.")
