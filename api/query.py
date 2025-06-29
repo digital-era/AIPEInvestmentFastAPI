@@ -263,29 +263,29 @@ async def get_stock_data(
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
 
-            # 获取最近一个交易日的1分钟数据 (auto_adjust=False保留Volume列)
             intraday_data = ticker.history(period="1d", interval="1m", auto_adjust=False)
 
             if intraday_data.empty:
                 raise HTTPException(status_code=404, detail=f"No intraday data found for {code}. It might be a non-trading day.")
 
-            # 计算累计均价 (VWAP)
+            # --- 计算累计均价 (VWAP) ---
             intraday_data['PriceVolume'] = intraday_data['Close'] * intraday_data['Volume']
             intraday_data['CumulativeVolume'] = intraday_data['Volume'].cumsum()
             intraday_data['CumulativePriceVolume'] = intraday_data['PriceVolume'].cumsum()
             intraday_data['avg_price'] = intraday_data['CumulativePriceVolume'] / intraday_data['CumulativeVolume']
 
-            # 准备返回给前端的数据
-            intraday_data['time'] = intraday_data.index.strftime('%H:%M:%S')
-            result_df = intraday_data[['time', 'Close', 'avg_price', 'Volume']].rename(columns={
+            # --- 【核心修正】在返回数据中同时包含日期和时间 ---
+            intraday_data['date'] = intraday_data.index.strftime('%Y-%m-%d') # 新增：提取日期
+            intraday_data['time'] = intraday_data.index.strftime('%H:%M:%S') # 保留：提取时间
+            
+            # 在返回的列中增加 'date'
+            result_df = intraday_data[['date', 'time', 'Close', 'avg_price', 'Volume']].rename(columns={
                 'Close': 'price',
                 'Volume': 'volume'
             })
             
-            # 填充可能出现的 NaN 值
             result_df = result_df.fillna(method='ffill')
             
-            # 转换为前端所需的JSON格式
             json_output = result_df.to_json(orient='records')
             
             return Response(content=json_output, media_type="application/json")
