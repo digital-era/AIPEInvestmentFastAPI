@@ -57,7 +57,7 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{code}.SZ"
     elif code.startswith(('43', '83', '87', '88')):  # 北交所
         return f"{code}.BJ"
-    elif code.startswith(('58', '55', '51')):  # 上证ETF
+    elif code.startswith(('58', '56','55', '51')):  # 上证ETF
         return f"{code}.SS"
     elif code.startswith(('15')):  # 深证ETF
         return f"{code}.SZ"
