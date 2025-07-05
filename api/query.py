@@ -6,6 +6,7 @@ import time
 import datetime
 import json
 import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
+import os
 
 app = FastAPI(
     title="Stock Query API",
