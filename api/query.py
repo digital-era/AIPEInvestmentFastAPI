@@ -121,6 +121,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         is_etf = (
             code.upper().startswith('58') or 
             code.upper().startswith('56') or 
+            code.upper().startswith('55') or 
             code.upper().startswith('51') or 
             code.upper().startswith('15')
         )
@@ -155,7 +156,27 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
                         "change": f"{daily_change:.2f}",
                         "price": row['Close']
                     })
-        
+
+        if(is_etf):
+            # 优先从我们自己的映射表中获取中文名称
+            file_path = "data/etf_name_data.json"    
+            name_map = {}
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    # 使用字典推导式高效地创建映射
+                    name_map = {str(item['code']): item['name'] for item in data}
+                    print(f"Successfully loaded {len(name_map)} names from {file_path}")
+                except Exception as e:
+                    print(f"Warning: Could not load or parse name map file at {file_path}. Error: {e}")
+                    name_map = {} # 加载失败则使用空字典
+            else:
+                print(f"Info: Name map file not found at {file_path}. Names will be fetched from yfinance.")
+            predefined_name = name_map.get(code)
+            if predefined_name:
+                name = predefined_name        
+            
         return PriceResponse(
             name=name,
             latestPrice=current_price,
