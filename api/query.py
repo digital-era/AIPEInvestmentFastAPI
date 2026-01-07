@@ -72,14 +72,29 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         print(f"Fetching price data with yfinance for {ticker_symbol}")
         ticker = yf.Ticker(ticker_symbol)
         current_price = None
+
+        # --- [新增/修改 1] 优先尝试从 fast_info 获取更精确的实时数据 ---
+        try:
+            # fast_info 的 last_price 在盘中通常比 info 更新
+            current_price = ticker.fast_info['last_price']
+            # 暂存 fast_info 的昨收，供后面使用
+            fast_prev_close = ticker.fast_info['previous_close']
+        except Exception:
+            # 如果版本过低或获取失败，保持为 None，后续逻辑会自动回退
+            current_price = None
+            fast_prev_close = None
+        # --------------------------------------------------------
+        
         # 等待一小段时间确保数据加载
-        time.sleep(0.2)
+        time.sleep(0.2)        
         
         # 获取基本信息
         info = ticker.info
-        
-        # 优先使用currentPrice获取实时价格
-        current_price = info.get('currentPrice')
+
+        # --- [修改 2] 仅当 fast_info 没拿到价格时，才尝试 info ---
+        if current_price is None:
+            current_price = info.get('currentPrice')
+        # -----------------------------------------------------
         
         # 如果currentPrice不可用，尝试使用regularMarketPrice
         if current_price is None:
@@ -95,10 +110,11 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         # 如果所有方法都无法获取价格，返回None
         if current_price is None:
             print(f"No price data available from yfinance for {ticker_symbol}")
-            return None
+            return None        
         
-        # 获取前一天收盘价
-        prev_close = info.get('previousClose')
+        # --- [修改 3] 获取前一天收盘价 (优先用 fast_info 的数据) ---
+        prev_close = fast_prev_close if fast_prev_close is not None else info.get('previousClose')
+        # ---------------------------------------------------------
         
         # 如果无法获取前一天收盘价，尝试从历史数据中提取
         if prev_close is None:
