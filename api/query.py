@@ -10,17 +10,16 @@ from datetime import datetime, timedelta
 import pytz
 
 # ==============================================================================
-# >>>>>>>>>>>>>>>   核心修复：Vercel 环境兼容性处理   <<<<<<<<<<<<<<<
+# 🔧 核心修复：Vercel 只读文件系统 & 网络环境适配
+# 必须在导入 mootdx 之前设置
 # ==============================================================================
-# 必须在导入 mootdx 之前执行
 os.environ['HOME'] = '/tmp'
 mootdx_config_dir = '/tmp/.mootdx'
 if not os.path.exists(mootdx_config_dir):
     os.makedirs(mootdx_config_dir, exist_ok=True)
-# ==============================================================================
 
+# 现在导入 mootdx
 from mootdx.quotes import Quotes
-# 移除了 problematic 的异常类导入，直接使用 Exception
 
 app = FastAPI(
     title="Stock Query API",
@@ -41,6 +40,7 @@ class PriceResponse(BaseModel):
     source: str = Field(..., description="Data source")
     currency: str = Field(..., description="Currency")
     dailydata: Optional[List[DailyData]] = Field(None, description="5 days data")
+    
     class Config:
         validate_by_name = True
 
@@ -87,48 +87,59 @@ def get_yfinance_ticker(code: str) -> str:
 def fetch_price_with_mootdx(code: str) -> Optional[PriceResponse]:
     client = None
     try:
+        # 选择市场
         if code.startswith(('43', '83', '87', '88')):
             market = 'bj'
         else:
             market = 'std'
-        
-        client = Quotes.factory(market=market, bestip=True)
+
+        # ======================================================================
+        # 🚀 关键优化：关闭 bestip
+        # Vercel 网络无法进行服务器测速，强制设为 False 使用默认配置
+        # ======================================================================
+        client = Quotes.factory(market=market, bestip=False)
         if not client:
-            raise Exception("无法连接到行情服务器")
+            raise Exception("Client initialization failed")
 
         result = client.quotes(symbol=[code])
+        
         if result is None or result.empty:
+            print(f"mootdx: No data for {code}")
             return None
 
         row = result.iloc[0]
         
-        # --- 安全获取数值 ---
-        try:
-            current_price = float(row['price'])
-            # 通达信标准字段是 'yesterday'
-            prev_close = float(row.get('yesterday', row.get('pre_close', row['open'])))
-        except (KeyError, ValueError, TypeError) as e:
-            print(f"Data parse error: {e}")
+        # 安全获取字段
+        current_price = row.get('price')
+        prev_close = row.get('yesterday') or row.get('pre_close') or row.get('open')
+        
+        if current_price is None or prev_close is None:
             return None
 
-        # --- 计算涨跌幅 (防除零) ---
+        try:
+            current_price = float(current_price)
+            prev_close = float(prev_close)
+        except ValueError:
+            return None
+
+        # 计算涨跌幅
         if prev_close == 0:
             change_percent = 0.0
-            change_amount = 0.0
         else:
             change_amount = current_price - prev_close
             change_percent = (change_amount / prev_close) * 100
 
         return PriceResponse(
-            name=str(row['name']),
+            name=str(row.get('name', code)),
             latestPrice=current_price,
             changePercent=round(change_percent, 2),
-            changeAmount=change_amount,
+            changeAmount=current_price - prev_close,
             source="mootdx",
             currency="CNY",
             dailydata=None 
         )
         
+    # 使用通用 Exception 替代 TdxConnectionError
     except Exception as e:
         print(f"mootdx error: {e}")
         return None
@@ -157,9 +168,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         info = ticker.info
 
         if current_price is None:
-            current_price = info.get('currentPrice')
-        if current_price is None:
-            current_price = info.get('regularMarketPrice')
+            current_price = info.get('currentPrice') or info.get('regularMarketPrice')
 
         if current_price is None:
             data = ticker.history(period="1d")
@@ -169,7 +178,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         if current_price is None:
             return None        
         
-        prev_close = fast_prev_close if fast_prev_close is not None else info.get('previousClose')
+        prev_close = fast_prev_close or info.get('previousClose')
         
         if prev_close is None:
             hist = ticker.history(period="2d")
@@ -272,31 +281,24 @@ async def get_stock_data(
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
             
-            # 获取分时数据
-            # 注意：Vercel 时区是UTC，这里强制获取最近数据
             intraday_data = ticker.history(period="1d", interval="1m")
             
-            # --- 数据处理 ---
             if intraday_data.empty:
-                # 尝试获取更长时间段的数据作为回退
                 intraday_data = ticker.history(period="5d", interval="5m")
                 if intraday_data.empty:
-                    # 极端情况：返回空数组
                     return Response(content="[]", media_type="application/json")
 
-            # 计算均价 (VWAP)
+            # 计算均价
             if 'Volume' in intraday_data.columns and 'Close' in intraday_data.columns:
                 volume = intraday_data['Volume'].replace(0, 1e-10)
                 intraday_data['avg_price'] = (intraday_data['Close'] * volume).cumsum() / volume.cumsum()
             else:
                 intraday_data['avg_price'] = intraday_data['Close']
 
-            # 处理时间
             intraday_data = intraday_data.reset_index()
             intraday_data['date'] = intraday_data['Datetime'].dt.strftime('%Y-%m-%d')
             intraday_data['time'] = intraday_data['Datetime'].dt.strftime('%H:%M:%S')
             
-            # 准备返回
             columns_to_keep = ['date', 'time', 'Close', 'avg_price']
             if 'Volume' in intraday_data.columns:
                 columns_to_keep.append('Volume')
