@@ -1,14 +1,25 @@
+import os
+
+# --- ⚠️ 必须放在文件顶部，用于修复 Vercel 只读文件系统错误 ---
+# mootdx 会在启动时尝试创建 .mootdx 配置目录，默认路径是 ~/
+# Vercel 环境是只读的，所以必须将其指向 /tmp (唯一可写的目录)
+os.environ['HOME'] = '/tmp'
+# 确保 /tmp/.mootdx 目录存在
+mootdx_config_dir = '/tmp/.mootdx'
+if not os.path.exists(mootdx_config_dir):
+    os.makedirs(mootdx_config_dir, exist_ok=True)
+# ------------------------------------------------------------------
+
 from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 import yfinance as yf
 from typing import Optional, List
 import time
-import datetime
 import json
 import pandas as pd
 import os
 
-# 新增导入：mootdx
+# 现在再导入 mootdx，它会使用 /tmp/.mootdx 作为配置目录
 from mootdx.quotes import Quotes
 from mootdx.exceptions import TdxConnectionError, TdxFunctionCallError
 
