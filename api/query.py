@@ -5,8 +5,12 @@ from typing import Optional, List
 import time
 import datetime
 import json
-import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
+import pandas as pd
 import os
+
+# 新增导入：mootdx
+from mootdx.quotes import Quotes
+from mootdx.exceptions import TdxConnectionError, TdxFunctionCallError
 
 app = FastAPI(
     title="Stock Query API",
@@ -193,7 +197,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
             predefined_name = name_map.get(code)
             if predefined_name:
                 name = predefined_name        
-            
+        
         return PriceResponse(
             name=name,
             latestPrice=current_price,
@@ -239,6 +243,93 @@ def fetch_financial_info_with_yfinance(code: str) -> Optional[InfoResponse]:
         print(f"yfinance error for financial info {code}: {str(e)}")
         return None
 
+# ==============================================================================
+# >>>>>>>>>>>>>>>>>>>>   新增/修改：MooTDX 适配逻辑   <<<<<<<<<<<<<<<<<<<<<<<<<<<
+# ==============================================================================
+
+def is_a_share_market(code: str) -> bool:
+    """判断是否为A股、ETF或北交所股票"""
+    code = code.upper()
+    if (code.startswith(('58', '56', '55', '51', '15')) or  # ETF
+        code.startswith(('60', '68', '900')) or           # 沪市
+        code.startswith(('00', '30', '200')) or           # 深市
+        code.startswith(('43', '83', '87', '88'))):       # 北交所
+        return True
+    return False
+
+def fetch_price_with_mootdx(code: str) -> Optional[PriceResponse]:
+    """使用mootdx获取A股/ETF/北交所数据 (安全版本)"""
+    client = None
+    try:
+        # 1. 确定市场类型
+        if code.startswith(('43', '83', '87', '88')):
+            market = 'bj' # 北交所
+        else:
+            market = 'std' # 沪深A股及ETF
+        
+        # 2. 连接服务器
+        client = Quotes.factory(market=market, bestip=True)
+        if not client:
+            raise ConnectionError("无法连接到行情服务器")
+
+        # 3. 获取行情
+        result = client.quotes(symbol=[code])
+        if result is None or result.empty:
+            return None
+
+        row = result.iloc[0]
+        
+        # 4. 解析数据
+        # 现价通常字段名为 'price'
+        current_price = float(row['price'])
+        
+        # --- 【安全逻辑】获取昨收价 ---
+        # 不同版本或协议下，昨收的字段名可能不同
+        prev_close = None
+        # 常见的通达信字段名列表
+        possible_keys = ['yesterday', 'pre_close', 'last_close', 'close_yesterday']
+        
+        for key in possible_keys:
+            if key in row:
+                try:
+                    prev_close = float(row[key])
+                    break
+                except (ValueError, TypeError):
+                    continue
+        
+        # 如果都没找到，回退到开盘价（保底方案，防止报错）
+        if prev_close is None:
+            prev_close = float(row['open'])
+        
+        # 股票名称
+        name = str(row['name']).strip()
+        
+        # 计算涨跌额和涨跌幅
+        change_amount = current_price - prev_close
+        change_percent = (change_amount / prev_close) * 100 if prev_close != 0 else 0.0
+
+        # 5. 构造响应
+        return PriceResponse(
+            name=name,
+            latestPrice=current_price,
+            changePercent=change_percent,
+            changeAmount=change_amount,
+            source="mootdx",
+            currency="CNY",
+            dailydata=None # mootdx 实时接口通常不包含历史5日，除非单独查
+        )
+        
+    except Exception as e:
+        print(f"mootdx error for {code}: {str(e)}")
+        return None
+    finally:
+        # 6. 释放连接资源
+        if client:
+            try:
+                client.exit()
+            except:
+                pass
+
 # --- API Endpoint (修改处) ---
 @app.get("/api/query")
 async def get_stock_data(
@@ -246,30 +337,39 @@ async def get_stock_data(
     query_type: str = Query(..., alias="type", description="Type of query: 'price', 'info', 'movingaveragedata', or 'intraday'")
 ):
     """
-    Fetches stock data based on the code and query type using yfinance.
+    Fetches stock data based on the code and query type.
+    A股/ETF/北交所 -> mootdx (高速)
+    其他 -> yfinance (兼容)
     """
+    # 去除可能的空格
+    code = code.strip()
+    
     if query_type == 'price':
+        # >>>>>>> 路由逻辑：先尝试mootdx，失败则降级 <<<<<<<<
+        if is_a_share_market(code):
+            response = fetch_price_with_mootdx(code)
+            if response:
+                return response
+            else:
+                print(f"mootdx failed for {code}, falling back to yfinance")
+        
+        # 如果不是A股，或者mootdx失败，使用yfinance
         response = fetch_price_with_yfinance(code)
         if response:
             return response
         else:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Price data not found for {code}"
-            )
+            raise HTTPException(status_code=404, detail=f"Price data not found for {code}")
 
     elif query_type == 'info':
+        # 基本面数据统一走yfinance
         response = fetch_financial_info_with_yfinance(code)
         if response:
             return response
         else:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Financial info not found for {code}"
-            )
+            raise HTTPException(status_code=404, detail=f"Financial info not found for {code}")
 
     elif query_type == 'movingaveragedata':
-        # 在这里实现获取和处理数据的逻辑，但不绘图
+        # K线图数据，为了保持格式统一，继续用yfinance
         try:
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
@@ -284,7 +384,6 @@ async def get_stock_data(
             plot_data = hist_data.tail(252).copy()
             
             # 将 DataFrame 转换为 JSON，同时处理日期索引
-            # reset_index() 将日期从索引变为普通列
             json_output = plot_data.reset_index().to_json(orient='records', date_format='iso')
             
             # 直接返回JSON响应
@@ -293,9 +392,6 @@ async def get_stock_data(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ==============================================================================
-    # >>>>>>>>>>>>>>>>>>>>   唯一新增的分支逻辑，完全独立   <<<<<<<<<<<<<<<<<<<<<<<<<<<
-    # ==============================================================================
     elif query_type == 'intraday':
         try:
             ticker_symbol = get_yfinance_ticker(code)
@@ -330,9 +426,6 @@ async def get_stock_data(
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    # ==============================================================================
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>     新增逻辑结束     <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    # ==============================================================================
 
     else:
         raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price', 'info', 'movingaveragedata', or 'intraday'.")
