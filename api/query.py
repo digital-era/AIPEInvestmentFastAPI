@@ -1,21 +1,33 @@
+import os
+import json
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 import yfinance as yf
 from typing import Optional, List
 import time
-import datetime
-import json
-import pandas as pd
-import os
-import requests  # 新增：用于调用iTick API
-from requests.exceptions import RequestException, Timeout
+from datetime import datetime, timedelta
+import pytz
+
+# ==============================================================================
+# >>>>>>>>>>>>>>>   核心修复：Vercel 环境兼容性处理   <<<<<<<<<<<<<<<
+# ==============================================================================
+# 必须在导入 mootdx 之前执行
+os.environ['HOME'] = '/tmp'
+mootdx_config_dir = '/tmp/.mootdx'
+if not os.path.exists(mootdx_config_dir):
+    os.makedirs(mootdx_config_dir, exist_ok=True)
+# ==============================================================================
+
+from mootdx.quotes import Quotes
+# 移除了 problematic 的异常类导入，直接使用 Exception
 
 app = FastAPI(
     title="Stock Query API",
-    description="An API to fetch real-time price and financial info for stocks using yfinance."
+    description="An API to fetch real-time price and financial info for stocks."
 )
 
-# --- Pydantic Models (完全保持原始状态) ---
+# --- Pydantic Models ---
 class DailyData(BaseModel):
     date: str
     change: str
@@ -26,237 +38,281 @@ class PriceResponse(BaseModel):
     latest_price: float = Field(..., alias='latestPrice')
     change_percent: float = Field(..., alias='changePercent')
     change_amount: float = Field(..., alias='changeAmount')
-    source: str = Field(..., description="Data source (yfinance)")
-    currency: str = Field(..., description="Currency of the stock")
-    dailydata: Optional[List[DailyData]] = Field(None, description="Recent 5 trading days data for ETFs")
+    source: str = Field(..., description="Data source")
+    currency: str = Field(..., description="Currency")
+    dailydata: Optional[List[DailyData]] = Field(None, description="5 days data")
     class Config:
-        validate_by_name = True  # 保持您原始的配置
+        validate_by_name = True
 
 class InfoResponse(BaseModel):
-    pe: float | None = Field(None, description="Price-to-Earnings Ratio (TTM)")
-    pb: float | None = Field(None, description="Price-to-Book Ratio")
-    roe: float | None = Field(None, description="Return on Equity")
-    source: str = Field(..., description="Data source (yfinance)")
+    pe: float | None = Field(None, description="P/E Ratio")
+    pb: float | None = Field(None, description="P/B Ratio")
+    roe: float | None = Field(None, description="ROE")
+    source: str = Field(..., description="Data source")
 
-# --- 配置 (新增) ---
-# 从环境变量读取iTick API密钥，确保安全。如果未设置，iTick相关功能将自动回退。
-ITICK_API_KEY = os.getenv("ITICK_API_KEY", "")
-ITICK_API_BASE_URL = "https://api.itick.com"  # 请替换为iTick实际的API基础地址
-ITICK_REQUEST_TIMEOUT = 3  # 设置iTick API请求超时时间（秒），避免因等待拖慢整体响应
+# --- Helper Functions ---
 
-# --- Helper Function (在原有基础上新增) ---
+def is_a_share_market(code: str) -> bool:
+    code = code.upper()
+    if (code.startswith(('58', '56', '55', '51', '15')) or  
+        code.startswith(('60', '68', '900')) or           
+        code.startswith(('00', '30', '200')) or           
+        code.startswith(('43', '83', '87', '88'))):       
+        return True
+    return False
+
 def get_yfinance_ticker(code: str) -> str:
-    """将股票代码转换为yfinance可识别的格式"""
-    # 港股处理（格式如: HK02899, hk00005, HK03690）
-    if code.upper().startswith('HK'):
-        # 提取数字部分，最多只移除开头的1个零
+    code = code.upper()
+    if code.startswith('HK'):
         num_part = code[2:]
         if num_part.startswith('0') and len(num_part) > 1:
-            num_part = num_part[1:]  # 只移除开头的第一个零
+            num_part = num_part[1:]
         return f"{num_part}.HK"
-    elif code.upper().startswith('US'):  # 美股
-        # 提取数字部分，最多只移除开头的US
-        code_part = code[2:]
-        return f"{code_part}"
+    elif code.startswith('US'):
+        return code[2:]
     
-    # A股处理
-    if code.startswith(('60', '68', '900')):  # 沪市
+    if code.startswith(('60', '68', '900')):
         return f"{code}.SS"
-    elif code.startswith(('00', '30', '200')):  # 深市
+    elif code.startswith(('00', '30', '200')):
         return f"{code}.SZ"
-    elif code.startswith(('43', '83', '87', '88')):  # 北交所
+    elif code.startswith(('43', '83', '87', '88')):
         return f"{code}.BJ"
-    elif code.startswith(('58', '56','55', '51')):  # 上证ETF
+    elif code.startswith(('58', '56','55', '51')):
         return f"{code}.SS"
-    elif code.startswith(('15')):  # 深证ETF
+    elif code.startswith(('15')):
         return f"{code}.SZ"
-    else:  # 其他市场
+    else:
         return code
 
-def get_itick_ticker(code: str) -> str:
-    """
-    将您内部的股票代码格式转换为iTick API所需的格式。
-    注意：iTick实际的代码格式规则需要您根据其官方文档调整。
-    此处仅为示例逻辑，假设iTick格式与yfinance类似。
-    """
-    # 此函数逻辑需根据iTick官方文档确认。以下为推测性实现。
-    # 例如，iTick可能直接用'HK0700'表示腾讯，而非'0700.HK'
-    if code.upper().startswith('HK'):
-        return code.upper()  # 假设iTick直接使用'HK0700'格式
-    elif code.upper().startswith('US'):
-        return code[2:].upper()  # 移除'US'，直接返回代码，如'AAPL'
-    else:
-        # 对于A股，可能直接使用数字代码，或需要后缀
-        # 此处假设iTick需要后缀，与yfinance一致
-        return get_yfinance_ticker(code)  # 暂用yfinance转换逻辑，需验证
-
-def fetch_price_with_itick(code: str) -> Optional[PriceResponse]:
-    """
-    使用iTick API获取股票实时价格数据。
-    如果失败（无密钥、网络错误、数据不全等），返回None，触发回退。
-    """
-    # 检查API密钥
-    if not ITICK_API_KEY:
-        print("iTick API key not configured. Will fallback to yfinance.")
-        return None
-
+def fetch_price_with_mootdx(code: str) -> Optional[PriceResponse]:
+    client = None
     try:
-        ticker_symbol = get_itick_ticker(code)
-        print(f"Fetching price data with iTick for {ticker_symbol}")
+        if code.startswith(('43', '83', '87', '88')):
+            market = 'bj'
+        else:
+            market = 'std'
+        
+        client = Quotes.factory(market=market, bestip=True)
+        if not client:
+            raise Exception("无法连接到行情服务器")
 
-        # 构造请求 (根据iTick实际API文档调整URL和参数)
-        url = f"{ITICK_API_BASE_URL}/real-time/quote"  # 示例端点
-        params = {
-            "symbol": ticker_symbol,
-            "apikey": ITICK_API_KEY,
-            "fields": "price,change_pct,change_amt,prev_close,name,currency"  # 示例字段
-        }
-
-        response = requests.get(url, params=params, timeout=ITICK_REQUEST_TIMEOUT)
-        response.raise_for_status()  # 如果状态码不是200，抛出HTTPError
-        data = response.json()
-
-        # 解析响应 (此部分逻辑必须根据iTick API的实际返回结构进行重写)
-        # 以下为示例解析，假设返回格式为: {"symbol": "...", "price": 100, "change_pct": 1.5, ...}
-        if data.get("price") is None:
-            print(f"iTick returned incomplete price data for {code}")
+        result = client.quotes(symbol=[code])
+        if result is None or result.empty:
             return None
 
-        current_price = float(data["price"])
-        # 假设iTick直接提供涨跌幅和涨跌额
-        change_percent = float(data.get("change_pct", 0))
-        change_amount = float(data.get("change_amt", current_price * change_percent / 100))
-        name = data.get("name", code)
-        currency = data.get("currency", "USD")
-        source = "iTick"  # 修改数据源标识
+        row = result.iloc[0]
+        
+        # --- 安全获取数值 ---
+        try:
+            current_price = float(row['price'])
+            # 通达信标准字段是 'yesterday'
+            prev_close = float(row.get('yesterday', row.get('pre_close', row['open'])))
+        except (KeyError, ValueError, TypeError) as e:
+            print(f"Data parse error: {e}")
+            return None
 
-        # 对于ETF/US股票，获取5日历史数据 (iTick可能需单独调用历史接口)
-        # 此处简化为不通过iTick获取，回退时由yfinance提供
-        is_etf = code.upper().startswith(('58', '56','55', '51', '15'))
+        # --- 计算涨跌幅 (防除零) ---
+        if prev_close == 0:
+            change_percent = 0.0
+            change_amount = 0.0
+        else:
+            change_amount = current_price - prev_close
+            change_percent = (change_amount / prev_close) * 100
+
+        return PriceResponse(
+            name=str(row['name']),
+            latestPrice=current_price,
+            changePercent=round(change_percent, 2),
+            changeAmount=change_amount,
+            source="mootdx",
+            currency="CNY",
+            dailydata=None 
+        )
+        
+    except Exception as e:
+        print(f"mootdx error: {e}")
+        return None
+    finally:
+        if client:
+            try:
+                client.exit()
+            except:
+                pass
+
+def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
+    try:
+        ticker_symbol = get_yfinance_ticker(code)
+        ticker = yf.Ticker(ticker_symbol)
+        current_price = None
+
+        try:
+            current_price = ticker.fast_info['last_price']
+            fast_prev_close = ticker.fast_info['previous_close']
+        except Exception:
+            current_price = None
+            fast_prev_close = None
+        
+        time.sleep(0.2)        
+        
+        info = ticker.info
+
+        if current_price is None:
+            current_price = info.get('currentPrice')
+        if current_price is None:
+            current_price = info.get('regularMarketPrice')
+
+        if current_price is None:
+            data = ticker.history(period="1d")
+            if not data.empty:
+                current_price = data['Close'].iloc[-1]
+        
+        if current_price is None:
+            return None        
+        
+        prev_close = fast_prev_close if fast_prev_close is not None else info.get('previousClose')
+        
+        if prev_close is None:
+            hist = ticker.history(period="2d")
+            if len(hist) >= 2:
+                prev_close = hist['Close'].iloc[-2]
+            else:
+                prev_close = current_price
+        
+        if prev_close is None or prev_close == 0:
+            prev_close = current_price
+
+        change_amount = current_price - prev_close
+        change_percent = (change_amount / prev_close) * 100 if prev_close != 0 else 0.0
+        
+        name = info.get('shortName', info.get('longName', code))
+        currency = info.get('currency', 'USD')
+        
+        is_etf = code.upper().startswith(('58', '56', '55', '51', '15'))
         is_us = code.upper().startswith('US')
-        daily_data = None
-        # 注意：如果需要从iTick获取历史数据，需在此处添加额外API调用和解析逻辑
+        
+        daily_data = []
+        if is_etf or is_us:
+            data = ticker.history(period="5d")
+            if not data.empty:
+                data = data.sort_index(ascending=False)
+                for i, (date, row) in enumerate(data.iterrows()):
+                    if i == 0:
+                        daily_change = ((row['Close'] - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
+                    elif i < len(data) - 1:
+                        prev_day_close = data.iloc[i+1]['Close']
+                        daily_change = ((row['Close'] - prev_day_close) / prev_day_close) * 100 if prev_day_close != 0 else 0.0
+                    else:
+                        daily_change = 0.0
+                    date_str = date.strftime('%Y-%m-%d')
+                    daily_data.append({
+                        "date": date_str,
+                        "change": f"{daily_change:.2f}",
+                        "price": row['Close']
+                    })
+
+        if is_etf:
+            file_path = "data/etf_name_data.json"    
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    name_map = {str(item['code']): item['name'] for item in data}
+                    predefined_name = name_map.get(code)
+                    if predefined_name:
+                        name = predefined_name        
+                except Exception as e:
+                    print(f"Warning: {e}")
 
         return PriceResponse(
             name=name,
             latestPrice=current_price,
             changePercent=change_percent,
             changeAmount=change_amount,
-            source=source,
+            source="yfinance",
             currency=currency,
-            dailydata=daily_data  # 根据上述逻辑，可能为None
+            dailydata=daily_data if is_etf or is_us else None
         )
-
-    except Timeout:
-        print(f"iTick API request timed out for {code}")
-    except RequestException as e:
-        print(f"Network error while fetching from iTick for {code}: {e}")
-    except (KeyError, ValueError, TypeError) as e:
-        print(f"Failed to parse iTick response for {code}: {e}")
+    
     except Exception as e:
-        print(f"Unexpected error with iTick for {code}: {e}")
-
-    # 任何异常都导致回退
-    return None
-
-def fetch_financial_info_with_itick(code: str) -> Optional[InfoResponse]:
-    """使用iTick API获取金融信息。失败时返回None。"""
-    if not ITICK_API_KEY:
+        print(f"yfinance error for {code}: {str(e)}")
         return None
 
-    try:
-        ticker_symbol = get_itick_ticker(code)
-        print(f"Fetching financial info with iTick for {ticker_symbol}")
+# --- API Endpoint ---
 
-        url = f"{ITICK_API_BASE_URL}/fundamentals"
-        params = {
-            "symbol": ticker_symbol,
-            "apikey": ITICK_API_KEY,
-            "fields": "pe_ratio,pb_ratio,roe"  # 示例字段名
-        }
-
-        response = requests.get(url, params=params, timeout=ITICK_REQUEST_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-
-        # 根据iTick实际返回结构解析
-        pe = data.get("pe_ratio")
-        pb = data.get("pb_ratio")
-        roe = data.get("roe")  # 假设已是百分比形式
-        source = "iTick"
-
-        return InfoResponse(
-            pe=float(pe) if pe is not None else None,
-            pb=float(pb) if pb is not None else None,
-            roe=float(roe) if roe is not None else None,
-            source=source
-        )
-
-    except Exception as e:
-        print(f"Error fetching financial info from iTick for {code}: {e}")
-        return None
-
-# --- 原有的yfinance查询函数 (完全保持不变) ---
-def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
-    """使用yfinance获取股票实时价格数据（原函数，作为回退）"""
-    # ... (您原有的fetch_price_with_yfinance函数代码，此处完全不变)
-    # 为确保清晰，已在代码开头部分完整保留，此处省略重复。
-
-def fetch_financial_info_with_yfinance(code: str) -> Optional[InfoResponse]:
-    """使用yfinance获取金融信息（原函数，作为回退）"""
-    # ... (您原有的fetch_financial_info_with_yfinance函数代码，此处完全不变)
-    # 为确保清晰，已在代码开头部分完整保留，此处省略重复。
-
-# --- API Endpoint (核心修改：添加iTick优先与回退) ---
 @app.get("/api/query")
 async def get_stock_data(
-    code: str = Query(..., description="The stock code, e.g., '600900' or 'AAPL'"),
-    query_type: str = Query(..., alias="type", description="Type of query: 'price', 'info', 'movingaveragedata', or 'intraday'")
+    code: str = Query(..., description="Stock code"),
+    query_type: str = Query(..., alias="type", description="Query type")
 ):
-    """
-    Fetches stock data based on the code and query type.
-    优先尝试iTick API，如果失败则自动回退到yfinance。
-    """
+    code = code.strip()
+    
     if query_type == 'price':
-        # 新增：优先尝试iTick
-        response = fetch_price_with_itick(code)
-        if response:
-            return response
-        # iTick失败，回退到原有的yfinance逻辑
-        print(f"iTick failed for price of {code}, falling back to yfinance.")
+        if is_a_share_market(code):
+            response = fetch_price_with_mootdx(code)
+            if response:
+                return response
+            else:
+                print(f"mootdx failed for {code}, falling back to yfinance")
+        
         response = fetch_price_with_yfinance(code)
         if response:
             return response
         else:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Price data not found for {code} (both iTick and yfinance failed)"
-            )
+            raise HTTPException(status_code=404, detail=f"Price not found: {code}")
 
     elif query_type == 'info':
-        # 新增：优先尝试iTick
-        response = fetch_financial_info_with_itick(code)
-        if response:
-            return response
-        # iTick失败，回退到原有的yfinance逻辑
-        print(f"iTick failed for info of {code}, falling back to yfinance.")
-        response = fetch_financial_info_with_yfinance(code)
+        response = fetch_price_with_yfinance(code)
         if response:
             return response
         else:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Financial info not found for {code} (both iTick and yfinance failed)"
-            )
+            raise HTTPException(status_code=404, detail=f"Info not found: {code}")
 
-    # 对于'movingaveragedata'和'intraday'，暂时保持仅使用yfinance，未来可按需适配
-    elif query_type == 'movingaveragedata':
-        # ... (您原有的movingaveragedata分支代码，完全不变)
-        # 此处省略，保持原样。
-        pass
     elif query_type == 'intraday':
-        # ... (您原有的intraday分支代码，完全不变)
-        # 此处省略，保持原样。
-        pass
+        try:
+            ticker_symbol = get_yfinance_ticker(code)
+            ticker = yf.Ticker(ticker_symbol)
+            
+            # 获取分时数据
+            # 注意：Vercel 时区是UTC，这里强制获取最近数据
+            intraday_data = ticker.history(period="1d", interval="1m")
+            
+            # --- 数据处理 ---
+            if intraday_data.empty:
+                # 尝试获取更长时间段的数据作为回退
+                intraday_data = ticker.history(period="5d", interval="5m")
+                if intraday_data.empty:
+                    # 极端情况：返回空数组
+                    return Response(content="[]", media_type="application/json")
+
+            # 计算均价 (VWAP)
+            if 'Volume' in intraday_data.columns and 'Close' in intraday_data.columns:
+                volume = intraday_data['Volume'].replace(0, 1e-10)
+                intraday_data['avg_price'] = (intraday_data['Close'] * volume).cumsum() / volume.cumsum()
+            else:
+                intraday_data['avg_price'] = intraday_data['Close']
+
+            # 处理时间
+            intraday_data = intraday_data.reset_index()
+            intraday_data['date'] = intraday_data['Datetime'].dt.strftime('%Y-%m-%d')
+            intraday_data['time'] = intraday_data['Datetime'].dt.strftime('%H:%M:%S')
+            
+            # 准备返回
+            columns_to_keep = ['date', 'time', 'Close', 'avg_price']
+            if 'Volume' in intraday_data.columns:
+                columns_to_keep.append('Volume')
+                
+            result_df = intraday_data[columns_to_keep].rename(columns={
+                'Close': 'price',
+                'Volume': 'volume'
+            })
+            
+            result_df = result_df.fillna(method='ffill').fillna(0)
+            json_output = result_df.to_json(orient='records')
+            return Response(content=json_output, media_type="application/json")
+
+        except Exception as e:
+            print(f"Intraday error: {e}")
+            return Response(content="[]", media_type="application/json")
+
     else:
-        raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price', 'info', 'movingaveragedata', or 'intraday'.")
+        raise HTTPException(status_code=400, detail="Invalid type parameter")
