@@ -17,7 +17,7 @@ app = FastAPI(
 )
 
 # Tushare配置 - 请在这里填入你的token
-TUSHARE_TOKEN = "请在这里填入你的tushare_token"  # 请替换为实际的token
+TUSHARE_TOKEN = "18592c39e9b5e8319cefadf056b3fc8d87c83579c7ca375f26de087c"  # 请替换为实际的token
 
 # 初始化tushare pro接口
 ts.set_token(TUSHARE_TOKEN)
