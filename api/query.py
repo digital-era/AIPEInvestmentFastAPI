@@ -3,13 +3,11 @@ from pydantic import BaseModel, Field
 import yfinance as yf
 from typing import Optional, List
 import time
-import datetime
 import json
 import pandas as pd
 import os
-import tushare as ts
 from datetime import datetime, timedelta
-import numpy as np
+import traceback
 
 app = FastAPI(
     title="Stock Query API",
@@ -19,9 +17,9 @@ app = FastAPI(
 # Tushare配置 - 请在这里填入你的token
 TUSHARE_TOKEN = "18592c39e9b5e8319cefadf056b3fc8d87c83579c7ca375f26de087c"  # 请替换为实际的token
 
-# 初始化tushare pro接口
-ts.set_token(TUSHARE_TOKEN)
-pro = ts.pro_api()
+# 由于在serverless环境中tushare可能无法正常工作，我们将主要依赖yfinance
+# 但我们可以尝试使用tushare的HTTP API作为替代方案
+TUSHARE_ENABLED = True  # 可以根据需要禁用tushare
 
 # --- Pydantic Models (完全保持原始状态) ---
 class DailyData(BaseModel):
@@ -47,33 +45,6 @@ class InfoResponse(BaseModel):
     source: str = Field(..., description="Data source (yfinance)")
 
 # --- Helper Functions ---
-def get_tushare_code(code: str) -> str:
-    """将股票代码转换为tushare可识别的格式"""
-    # 港股处理
-    if code.upper().startswith('HK'):
-        # 提取数字部分，移除开头的HK
-        num_part = code[2:]
-        # 港股代码格式：如02899.HK
-        return f"{num_part.zfill(5)}.HK"
-    elif code.upper().startswith('US'):  # 美股
-        # 提取数字部分，移除开头的US
-        code_part = code[2:]
-        return f"{code_part}"
-    
-    # A股处理
-    if code.startswith(('60', '68', '900')):  # 沪市
-        return f"{code}.SH"
-    elif code.startswith(('00', '30', '200')):  # 深市
-        return f"{code}.SZ"
-    elif code.startswith(('43', '83', '87', '88')):  # 北交所
-        return f"{code}.BJ"
-    elif code.startswith(('58', '56', '55', '51')):  # 上证ETF
-        return f"{code}.SH"
-    elif code.startswith(('15')):  # 深证ETF
-        return f"{code}.SZ"
-    else:  # 其他市场
-        return code
-
 def get_yfinance_ticker(code: str) -> str:
     """将股票代码转换为yfinance可识别的格式"""
     # 港股处理（格式如: HK02899, hk00005, HK03690）
@@ -97,53 +68,113 @@ def get_yfinance_ticker(code: str) -> str:
         return f"{code}.SS"
     elif code.startswith(('15')):  # 深证ETF
         return f"{code}.SZ"
-    else:  # 其他市场
+    else:
         return code
 
-# --- Tushare API Functions (使用Python接口) ---
+# --- 简化的Tushare HTTP API Functions ---
 def fetch_price_with_tushare(code: str) -> Optional[PriceResponse]:
-    """使用tushare获取股票实时价格数据"""
+    """使用tushare HTTP API获取股票实时价格数据"""
+    if not TUSHARE_ENABLED:
+        return None
+        
     try:
-        tushare_code = get_tushare_code(code)
-        print(f"Fetching price data with tushare for {tushare_code}")
+        import requests
         
-        # 获取实时行情数据
-        # 首先尝试获取股票基本信息
-        df_basic = pro.stock_basic(ts_code=tushare_code)
-        if df_basic.empty:
-            print(f"No basic info found in tushare for {tushare_code}")
+        # 构建tushare代码
+        if code.upper().startswith('HK'):
+            num_part = code[2:]
+            tushare_code = f"{num_part.zfill(5)}.HK"
+        elif code.upper().startswith('US'):
+            tushare_code = code[2:]
+        elif code.startswith(('60', '68', '900')):
+            tushare_code = f"{code}.SH"
+        elif code.startswith(('00', '30', '200')):
+            tushare_code = f"{code}.SZ"
+        elif code.startswith(('43', '83', '87', '88')):
+            tushare_code = f"{code}.BJ"
+        elif code.startswith(('58', '56', '55', '51')):
+            tushare_code = f"{code}.SH"
+        elif code.startswith('15'):
+            tushare_code = f"{code}.SZ"
+        else:
+            tushare_code = code
+            
+        print(f"Fetching price data with tushare HTTP API for {tushare_code}")
+        
+        # 使用tushare的HTTP API
+        url = "http://api.tushare.pro"
+        
+        # 获取股票基本信息
+        data = {
+            "api_name": "stock_basic",
+            "token": TUSHARE_TOKEN,
+            "params": {"ts_code": tushare_code},
+            "fields": "ts_code,name"
+        }
+        
+        response = requests.post(url, json=data, timeout=5)
+        if response.status_code != 200:
+            print(f"Tushare HTTP API error: {response.status_code}")
             return None
+            
+        result = response.json()
+        if result.get('code') != 0 or not result.get('data', {}).get('items'):
+            print(f"No basic info from tushare for {tushare_code}")
+            return None
+            
+        items = result['data']['items']
+        name = items[0][1] if items else code
         
-        name = df_basic.iloc[0]['name']
-        
-        # 获取实时行情
-        # 注意：实时行情需要积分，这里使用日线数据作为替代
+        # 获取日线数据
         today = datetime.now().strftime('%Y%m%d')
+        data = {
+            "api_name": "daily",
+            "token": TUSHARE_TOKEN,
+            "params": {"ts_code": tushare_code, "start_date": today, "end_date": today},
+            "fields": "trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+        }
         
-        # 获取当日和前一日的数据
-        df_daily = pro.daily(ts_code=tushare_code, start_date=today, end_date=today)
-        
-        if df_daily.empty:
-            # 如果当日无数据，可能是非交易日，获取最近交易日的数据
-            df_daily = pro.daily(ts_code=tushare_code, limit=2)
-            if df_daily.empty:
-                print(f"No daily data found in tushare for {tushare_code}")
+        response = requests.post(url, json=data, timeout=5)
+        if response.status_code != 200:
+            print(f"Tushare daily data error: {response.status_code}")
+            return None
+            
+        result = response.json()
+        if result.get('code') != 0 or not result.get('data', {}).get('items'):
+            # 尝试获取最近的数据
+            data["params"] = {"ts_code": tushare_code, "limit": 2}
+            response = requests.post(url, json=data, timeout=5)
+            if response.status_code != 200:
+                return None
+                
+            result = response.json()
+            if result.get('code') != 0 or not result.get('data', {}).get('items'):
+                print(f"No daily data from tushare for {tushare_code}")
                 return None
         
-        # 获取最新数据
-        latest_data = df_daily.iloc[0]
-        current_price = latest_data['close']
+        items = result['data']['items']
+        if not items:
+            return None
+            
+        # 解析数据
+        latest_item = items[0]
+        fields = result['data']['fields']
         
-        # 获取前收盘价
-        if len(df_daily) > 1:
-            prev_close = df_daily.iloc[1]['close']
-        else:
-            # 如果只有一天数据，使用当日开盘价作为参考
-            prev_close = latest_data['open']
+        # 创建字段映射
+        field_map = {}
+        for i, field in enumerate(fields):
+            field_map[field] = latest_item[i] if i < len(latest_item) else None
+        
+        current_price = field_map.get('close')
+        prev_close = field_map.get('pre_close')
+        
+        if current_price is None or prev_close is None:
+            print(f"Incomplete data from tushare for {tushare_code}")
+            return None
         
         # 计算涨跌幅和涨跌额
-        change_percent = ((current_price - prev_close) / prev_close) * 100
-        change_amount = current_price - prev_close
+        change_percent = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0
+        change_amount = current_price - prev_close if prev_close else 0
         
         # 获取日线数据用于ETF/US股票
         is_etf = (
@@ -157,53 +188,54 @@ def fetch_price_with_tushare(code: str) -> Optional[PriceResponse]:
         
         daily_data = []
         if is_etf or is_us:
-            # 获取最近5个交易日的ETF数据
-            df_history = pro.daily(ts_code=tushare_code, limit=5)
+            # 获取最近5个交易日数据
+            data = {
+                "api_name": "daily",
+                "token": TUSHARE_TOKEN,
+                "params": {"ts_code": tushare_code, "limit": 5},
+                "fields": "trade_date,close"
+            }
             
-            if not df_history.empty:
-                # 按日期降序排序（最新日期在前）
-                df_history = df_history.sort_values('trade_date', ascending=False)
-                
-                for i, row in df_history.iterrows():
-                    close_price = row['close']
-                    trade_date = row['trade_date']
+            response = requests.post(url, json=data, timeout=5)
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('code') == 0 and result.get('data', {}).get('items'):
+                    history_items = result['data']['items']
+                    history_fields = result['data']['fields']
                     
-                    # 计算涨跌幅
-                    if i == 0:  # 最新一天
-                        daily_change = change_percent
-                    elif i == 1:  # 前一天
-                        prev_close_2 = df_history.iloc[1]['close'] if len(df_history) > 1 else close_price
-                        daily_change = ((close_price - prev_close_2) / prev_close_2) * 100 if prev_close_2 != 0 else 0.0
-                    else:
-                        prev_close_i = df_history.iloc[i]['close']
-                        next_close_i = df_history.iloc[i-1]['close']
-                        daily_change = ((next_close_i - prev_close_i) / prev_close_i) * 100 if prev_close_i != 0 else 0.0
-                    
-                    daily_data.append({
-                        "date": trade_date,
-                        "change": f"{daily_change:.2f}",
-                        "price": close_price
-                    })
+                    for i, item in enumerate(history_items):
+                        item_dict = dict(zip(history_fields, item))
+                        close_price = item_dict.get('close')
+                        trade_date = item_dict.get('trade_date')
+                        
+                        if close_price and trade_date:
+                            if i == 0:
+                                daily_change = change_percent
+                            elif i == 1:
+                                prev_close_2 = history_items[1][history_fields.index('close')] if len(history_items) > 1 else close_price
+                                daily_change = ((close_price - prev_close_2) / prev_close_2) * 100 if prev_close_2 else 0
+                            else:
+                                daily_change = 0
+                            
+                            daily_data.append({
+                                "date": trade_date,
+                                "change": f"{daily_change:.2f}",
+                                "price": close_price
+                            })
         
         # 处理ETF名称映射
         if is_etf:
             file_path = "data/etf_name_data.json"    
-            name_map = {}
             if os.path.exists(file_path):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                     name_map = {str(item['code']): item['name'] for item in data}
-                    print(f"Successfully loaded {len(name_map)} names from {file_path}")
+                    predefined_name = name_map.get(code)
+                    if predefined_name:
+                        name = predefined_name
                 except Exception as e:
-                    print(f"Warning: Could not load or parse name map file at {file_path}. Error: {e}")
-                    name_map = {}
-            else:
-                print(f"Info: Name map file not found at {file_path}.")
-            
-            predefined_name = name_map.get(code)
-            if predefined_name:
-                name = predefined_name
+                    print(f"Error loading name map: {e}")
         
         # 确定货币
         if code.upper().startswith('HK'):
@@ -224,40 +256,65 @@ def fetch_price_with_tushare(code: str) -> Optional[PriceResponse]:
         )
     
     except Exception as e:
-        print(f"tushare error for {code}: {str(e)}")
+        print(f"Tushare HTTP API error for {code}: {e}")
+        traceback.print_exc()
         return None
 
 def fetch_intraday_with_tushare(code: str) -> Optional[Response]:
-    """使用tushare获取分时数据"""
+    """使用tushare HTTP API获取分时数据"""
+    if not TUSHARE_ENABLED:
+        return None
+        
     try:
-        tushare_code = get_tushare_code(code)
-        print(f"Fetching intraday data with tushare for {tushare_code}")
+        import requests
         
-        # 获取当日分时数据
-        # 注意：实时分时数据可能需要积分，这里使用日线分钟数据
-        today = datetime.now().strftime('%Y%m%d')
-        
-        # 使用通用行情接口获取分钟数据
-        # 注意：这个接口可能需要特定的权限
-        try:
-            # 尝试获取当日分钟数据
-            df_intraday = pro.bo_daily(ts_code=tushare_code, trade_date=today)
+        # 构建tushare代码
+        if code.upper().startswith('HK'):
+            num_part = code[2:]
+            tushare_code = f"{num_part.zfill(5)}.HK"
+        elif code.upper().startswith('US'):
+            tushare_code = code[2:]
+        elif code.startswith(('60', '68', '900')):
+            tushare_code = f"{code}.SH"
+        elif code.startswith(('00', '30', '200')):
+            tushare_code = f"{code}.SZ"
+        elif code.startswith(('43', '83', '87', '88')):
+            tushare_code = f"{code}.BJ"
+        elif code.startswith(('58', '56', '55', '51')):
+            tushare_code = f"{code}.SH"
+        elif code.startswith('15'):
+            tushare_code = f"{code}.SZ"
+        else:
+            tushare_code = code
             
-            if df_intraday.empty:
-                # 如果当日没有数据，尝试获取最近交易日的分钟数据
-                # 首先获取最近交易日
-                df_trade_cal = pro.trade_cal(exchange='', start_date=today, end_date=today)
-                if not df_trade_cal.empty and df_trade_cal.iloc[0]['is_open'] == 1:
-                    # 如果是交易日但没有数据，返回空
-                    print(f"No intraday data available for {tushare_code} on {today}")
-                    return None
-                else:
-                    # 如果不是交易日，获取最近一个交易日的分钟数据
-                    # 这里简化处理，直接返回空，由yfinance接管
-                    return None
-        except Exception as e:
-            print(f"tushare intraday API error: {e}")
-            # 如果接口不可用，返回None，让yfinance处理
+        print(f"Fetching intraday data with tushare HTTP API for {tushare_code}")
+        
+        # 使用tushare的HTTP API
+        url = "http://api.tushare.pro"
+        
+        # 尝试获取分时数据
+        today = datetime.now().strftime('%Y%m%d')
+        data = {
+            "api_name": "realtime_quote",
+            "token": TUSHARE_TOKEN,
+            "params": {"ts_code": tushare_code},
+            "fields": "ts_code,trade_time,price,change,volume"
+        }
+        
+        response = requests.post(url, json=data, timeout=5)
+        if response.status_code != 200:
+            print(f"Tushare realtime_quote error: {response.status_code}")
+            return None
+            
+        result = response.json()
+        if result.get('code') != 0 or not result.get('data', {}).get('items'):
+            print(f"No realtime data from tushare for {tushare_code}")
+            return None
+        
+        items = result['data']['items']
+        fields = result['data']['fields']
+        
+        if not items:
             return None
         
         # 处理分时数据
@@ -265,13 +322,11 @@ def fetch_intraday_with_tushare(code: str) -> Optional[Response]:
         cumulative_volume = 0
         cumulative_price_volume = 0
         
-        # 按时间排序
-        df_intraday = df_intraday.sort_values('trade_time')
-        
-        for _, row in df_intraday.iterrows():
-            trade_time = row.get('trade_time')
-            price = row.get('price')
-            volume = row.get('vol', 0)
+        for item in items:
+            item_dict = dict(zip(fields, item))
+            trade_time = item_dict.get('trade_time')
+            price = item_dict.get('price')
+            volume = item_dict.get('volume', 0)
             
             if trade_time and price is not None:
                 # 计算累计均价 (VWAP)
@@ -289,10 +344,10 @@ def fetch_intraday_with_tushare(code: str) -> Optional[Response]:
                         date_str = trade_datetime.strftime('%Y-%m-%d')
                         time_str = trade_datetime.strftime('%H:%M:%S')
                     else:
-                        date_str = today[:4] + '-' + today[4:6] + '-' + today[6:8]
+                        date_str = datetime.now().strftime('%Y-%m-%d')
                         time_str = str(trade_time)
                 except:
-                    date_str = today[:4] + '-' + today[4:6] + '-' + today[6:8]
+                    date_str = datetime.now().strftime('%Y-%m-%d')
                     time_str = str(trade_time)
                 
                 intraday_records.append({
@@ -315,26 +370,27 @@ def fetch_intraday_with_tushare(code: str) -> Optional[Response]:
         return Response(content=json_output, media_type="application/json")
     
     except Exception as e:
-        print(f"tushare intraday error for {code}: {str(e)}")
+        print(f"Tushare intraday HTTP API error for {code}: {e}")
+        traceback.print_exc()
         return None
 
-# --- 原有的yfinance函数保持不变 ---
+# --- 原有的yfinance函数 ---
 def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
     """使用yfinance获取股票实时价格数据（回落机制）"""
     try:
         ticker_symbol = get_yfinance_ticker(code)
         print(f"Fetching price data with yfinance for {ticker_symbol} (fallback)")
         ticker = yf.Ticker(ticker_symbol)
+        
+        # 尝试快速获取数据
         current_price = None
-
         try:
-            current_price = ticker.fast_info['last_price']
-            fast_prev_close = ticker.fast_info['previous_close']
-        except Exception:
-            current_price = None
+            current_price = ticker.fast_info.get('last_price')
+            fast_prev_close = ticker.fast_info.get('previous_close')
+        except:
             fast_prev_close = None
         
-        time.sleep(0.2)        
+        time.sleep(0.1)
         
         info = ticker.info
 
@@ -345,19 +401,17 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
             current_price = info.get('regularMarketPrice')
 
         if current_price is None:
-            print("Falling back to historical data for current price")
             data = ticker.history(period="1d")
             if not data.empty:
                 current_price = data['Close'].iloc[-1]
         
         if current_price is None:
             print(f"No price data available from yfinance for {ticker_symbol}")
-            return None        
+            return None
         
         prev_close = fast_prev_close if fast_prev_close is not None else info.get('previousClose')
         
         if prev_close is None:
-            print("prev_close is None")
             hist = ticker.history(period="2d")
             if len(hist) >= 2:
                 prev_close = hist['Close'].iloc[-2]
@@ -365,7 +419,7 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
                 prev_close = current_price
         
         change_amount = current_price - prev_close
-        change_percent = (change_amount / prev_close) * 100
+        change_percent = (change_amount / prev_close) * 100 if prev_close else 0
         
         name = info.get('shortName', info.get('longName', code))
         currency = info.get('currency', 'USD')
@@ -381,7 +435,6 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         
         daily_data = []
         if is_etf or is_us:
-            print(f"Fetching 5-day ETF data for {ticker_symbol}")
             data = ticker.history(period="5d")
             
             if not data.empty:
@@ -389,11 +442,11 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
                 
                 for i, (date, row) in enumerate(data.iterrows()):
                     if i == 0:
-                        daily_change = ((row['Close'] - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
+                        daily_change = ((row['Close'] - prev_close) / prev_close) * 100 if prev_close else 0
                     elif i < len(data) - 1:
-                        daily_change = ((row['Close'] - data.iloc[i+1]['Close']) / data.iloc[i+1]['Close']) * 100 if data.iloc[i+1]['Close'] != 0 else 0.0
+                        daily_change = ((row['Close'] - data.iloc[i+1]['Close']) / data.iloc[i+1]['Close']) * 100 if data.iloc[i+1]['Close'] else 0
                     else:
-                        daily_change = 0.0
+                        daily_change = 0
                     
                     date_str = date.strftime('%Y-%m-%d')
                     daily_data.append({
@@ -404,23 +457,17 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
 
         if is_etf:
             file_path = "data/etf_name_data.json"    
-            name_map = {}
             if os.path.exists(file_path):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                     name_map = {str(item['code']): item['name'] for item in data}
-                    print(f"Successfully loaded {len(name_map)} names from {file_path}")
+                    predefined_name = name_map.get(code)
+                    if predefined_name:
+                        name = predefined_name
                 except Exception as e:
-                    print(f"Warning: Could not load or parse name map file at {file_path}. Error: {e}")
-                    name_map = {}
-            else:
-                print(f"Info: Name map file not found at {file_path}.")
-            
-            predefined_name = name_map.get(code)
-            if predefined_name:
-                name = predefined_name        
-            
+                    print(f"Error loading name map: {e}")
+        
         return PriceResponse(
             name=name,
             latestPrice=current_price,
@@ -432,7 +479,8 @@ def fetch_price_with_yfinance(code: str) -> Optional[PriceResponse]:
         )
     
     except Exception as e:
-        print(f"yfinance error for {code}: {str(e)}")
+        print(f"Yfinance error for {code}: {e}")
+        traceback.print_exc()
         return None
 
 def fetch_financial_info_with_yfinance(code: str) -> Optional[InfoResponse]:
@@ -461,10 +509,11 @@ def fetch_financial_info_with_yfinance(code: str) -> Optional[InfoResponse]:
         )
     
     except Exception as e:
-        print(f"yfinance error for financial info {code}: {str(e)}")
+        print(f"Yfinance error for financial info {code}: {e}")
+        traceback.print_exc()
         return None
 
-# --- 修改后的API Endpoint ---
+# --- API Endpoint ---
 @app.get("/api/query")
 async def get_stock_data(
     code: str = Query(..., description="The stock code, e.g., '600900' or 'AAPL'"),
@@ -473,61 +522,68 @@ async def get_stock_data(
     """
     Fetches stock data based on the code and query type using tushare with fallback to yfinance.
     """
-    if query_type == 'price':
-        # 先尝试tushare，失败则回落到yfinance
-        response = fetch_price_with_tushare(code)
-        if response:
-            return response
-        else:
-            print(f"tushare failed, falling back to yfinance for {code}")
+    print(f"Received request: code={code}, type={query_type}")
+    
+    try:
+        if query_type == 'price':
+            # 先尝试tushare HTTP API
+            response = fetch_price_with_tushare(code)
+            if response:
+                return response
+            
+            print(f"Tushare failed, falling back to yfinance for {code}")
             response = fetch_price_with_yfinance(code)
             if response:
                 return response
-            else:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"Price data not found for {code}"
-                )
+            
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Price data not found for {code}"
+            )
 
-    elif query_type == 'info':
-        # info查询保持不变，仍然使用yfinance
-        response = fetch_financial_info_with_yfinance(code)
-        if response:
-            return response
-        else:
+        elif query_type == 'info':
+            response = fetch_financial_info_with_yfinance(code)
+            if response:
+                return response
+            
             raise HTTPException(
                 status_code=404, 
                 detail=f"Financial info not found for {code}"
             )
 
-    elif query_type == 'movingaveragedata':
-        # 保持不变
-        try:
-            ticker_symbol = get_yfinance_ticker(code)
-            ticker = yf.Ticker(ticker_symbol)
-            hist_data = ticker.history(period="2y", auto_adjust=False, back_adjust=True)
-            if hist_data.empty:
-                raise HTTPException(status_code=404, detail="No historical data found")
+        elif query_type == 'movingaveragedata':
+            try:
+                ticker_symbol = get_yfinance_ticker(code)
+                ticker = yf.Ticker(ticker_symbol)
+                hist_data = ticker.history(period="2y", auto_adjust=False, back_adjust=True)
+                
+                if hist_data.empty:
+                    raise HTTPException(status_code=404, detail="No historical data found")
 
-            ma_periods = [5, 10, 20, 30, 60, 120, 250]
-            for period in ma_periods:
-                hist_data[f'MA_{period}'] = hist_data['Close'].rolling(window=period).mean()
+                ma_periods = [5, 10, 20, 30, 60, 120, 250]
+                for period in ma_periods:
+                    hist_data[f'MA_{period}'] = hist_data['Close'].rolling(window=period).mean()
 
-            plot_data = hist_data.tail(252).copy()
-            json_output = plot_data.reset_index().to_json(orient='records', date_format='iso')
+                plot_data = hist_data.tail(252).copy()
+                json_output = plot_data.reset_index().to_json(orient='records', date_format='iso')
+                
+                return Response(content=json_output, media_type="application/json")
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"Error in movingaveragedata: {e}")
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Error processing data: {str(e)}")
+
+        elif query_type == 'intraday':
+            # 先尝试tushare HTTP API
+            tushare_response = fetch_intraday_with_tushare(code)
+            if tushare_response:
+                return tushare_response
             
-            return Response(content=json_output, media_type="application/json")
+            print(f"Tushare intraday failed, falling back to yfinance for {code}")
             
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    elif query_type == 'intraday':
-        # 先尝试tushare，失败则回落到yfinance
-        tushare_response = fetch_intraday_with_tushare(code)
-        if tushare_response:
-            return tushare_response
-        else:
-            print(f"tushare intraday failed, falling back to yfinance for {code}")
             try:
                 ticker_symbol = get_yfinance_ticker(code)
                 ticker = yf.Ticker(ticker_symbol)
@@ -535,7 +591,10 @@ async def get_stock_data(
                 intraday_data = ticker.history(period="1d", interval="1m", auto_adjust=False)
 
                 if intraday_data.empty:
-                    raise HTTPException(status_code=404, detail=f"No intraday data found for {code}")
+                    raise HTTPException(
+                        status_code=404, 
+                        detail=f"No intraday data found for {code}. It might be a non-trading day."
+                    )
 
                 intraday_data['PriceVolume'] = intraday_data['Close'] * intraday_data['Volume']
                 intraday_data['CumulativeVolume'] = intraday_data['Volume'].cumsum()
@@ -555,8 +614,38 @@ async def get_stock_data(
                 
                 return Response(content=json_output, media_type="application/json")
 
+            except HTTPException:
+                raise
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
+                print(f"Yfinance intraday error: {e}")
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Error fetching intraday data: {str(e)}"
+                )
 
-    else:
-        raise HTTPException(status_code=400, detail="Invalid 'type' parameter. Use 'price', 'info', 'movingaveragedata', or 'intraday'.")
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid 'type' parameter. Use 'price', 'info', 'movingaveragedata', or 'intraday'."
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected error in API endpoint: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        )
+
+# 健康检查端点
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# 根路径端点
+@app.get("/")
+async def root():
+    return {"message": "Stock Query API is running", "timestamp": datetime.now().isoformat()}
