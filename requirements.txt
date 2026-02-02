@@ -2,3 +2,4 @@ fastapi
 uvicorn  # for local development
 pydantic
 yfinance
+Ashare
