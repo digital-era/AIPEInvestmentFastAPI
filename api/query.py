@@ -36,6 +36,107 @@ class InfoResponse(BaseModel):
     roe: float | None = Field(None, description="Return on Equity")
     source: str = Field(..., description="Data source (yfinance)")
 
+# --- [新增] 用于Ashare分时数据获取的辅助函数 ---
+def get_ashare_ticker(code: str) -> str:
+    """将股票代码转换为Ashare库可识别的本地格式。"""
+    # 去除yfinance可能已添加的后缀（如果用户直接传入的是完整ticker）
+    # 例如：将 '000001.SZ' 转换为 '000001'
+    if '.' in code:
+        code = code.split('.')[0]
+
+    # 处理带市场前缀的代码（如HK, US）
+    # Ashare主要面向A股，对于港股、美股可能不支持或需要其他方式，这里我们统一移除前缀。
+    if code.upper().startswith('HK'):
+        # 移除‘HK'前缀，并保留数字部分（Ashare可能不支持港股）
+        ashare_code = code[2:]
+        # 可选：移除开头的0，但Ashare对港股支持不明，此处以返回数字代码为主
+        if ashare_code.startswith('0'):
+            ashare_code = ashare_code.lstrip('0')
+        return ashare_code
+    elif code.upper().startswith('US'):
+        # 美股通常直接使用代码，移除‘US'前缀
+        ashare_code = code[2:]
+        return ashare_code
+    else:
+        # 对于纯A股数字代码，直接返回（如 600000, 000001, 300001）
+        # 这已经是Ashare需要的格式
+        return code
+        
+def fetch_intraday_with_ashare(code: str) -> Optional[pd.DataFrame]:
+    """
+    使用Ashare库尝试获取A股/A股ETF的日内分钟数据。
+    成功则返回格式化的DataFrame，失败则返回None。
+    """
+    try:
+        # 导入Ashare
+        from Ashare import get_price
+        # Ashare所需的代码格式通常与本地市场代码相同（如‘000001'），或需简单转换。
+        ashare_code = get_ashare_ticker(code)  # 原先为 ashare_code = code
+        print(f"Attempting to fetch intraday data with Ashare for {ashare_code} (original: {code})")
+
+        # 使用Ashare获取最近240分钟（一个交易日）的1分钟线数据
+        # Ashare返回一个字典，键是代码，值是DataFrame
+        data_dict = get_price(
+            security_list=[ashare_code],
+            frequency='1min',
+            count=240
+        )
+
+        # 检查是否成功获取到数据
+        if not data_dict or ashare_code not in data_dict:
+            print(f"No data returned from Ashare for {ashare_code}")
+            return None
+
+        df_raw = data_dict[ashare_code]
+
+        # 检查数据是否有效（例如，是否有‘close’列）
+        if df_raw.empty or 'close' not in df_raw.columns:
+            print(f"Data from Ashare for {ashare_code} is empty or malformed.")
+            return None
+
+        # 将Ashare数据格式转换为与yfinance输出兼容的格式
+        df = df_raw.copy()
+        # 确保索引是DatetimeIndex（Ashare通常返回带时间戳的索引）
+        if not isinstance(df.index, pd.DatetimeIndex):
+            # 如果索引是时间戳字符串或其他格式，需要转换，这里假设它是时间戳
+            try:
+                df.index = pd.to_datetime(df.index)
+            except Exception as e:
+                print(f"Could not parse index as datetime: {e}")
+                return None
+
+        # 重命名列以匹配您的API输出：'close' -> 'price'
+        df = df.rename(columns={'close': 'price'})
+
+        # 计算累计均价 (VWAP)，Ashare通常提供‘volume’列
+        if 'volume' in df.columns:
+            df['PriceVolume'] = df['price'] * df['volume']
+            df['CumulativeVolume'] = df['volume'].cumsum()
+            df['CumulativePriceVolume'] = df['PriceVolume'].cumsum()
+            df['avg_price'] = df['CumulativePriceVolume'] / df['CumulativeVolume']
+            # 删除中间计算列
+            df = df.drop(columns=['PriceVolume', 'CumulativeVolume', 'CumulativePriceVolume'])
+        else:
+            # 如果没有成交量，将均价设为价格本身
+            df['avg_price'] = df['price']
+
+        # 提取日期和时间列，格式与yfinance分支保持一致
+        df['date'] = df.index.strftime('%Y-%m-%d')
+        df['time'] = df.index.strftime('%H:%M:%S')
+
+        # 选取并重命名最终返回的列
+        result_df = df[['date', 'time', 'price', 'avg_price', 'volume']].rename(columns={'volume': 'volume'})
+
+        # 前向填充可能的NaN值
+        result_df = result_df.fillna(method='ffill')
+        print(f"Successfully fetched intraday data with Ashare for {ashare_code}")
+        return result_df
+
+    except Exception as e:
+        # 捕获Ashare可能出现的任何异常（如导入错误、网络问题等）
+        print(f"Ashare failed for {code}. Error: {str(e)}")
+        return None
+
 # --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
     """将股票代码转换为yfinance可识别的格式"""
@@ -297,6 +398,15 @@ async def get_stock_data(
     # >>>>>>>>>>>>>>>>>>>>   唯一新增的分支逻辑，完全独立   <<<<<<<<<<<<<<<<<<<<<<<<<<<
     # ==============================================================================
     elif query_type == 'intraday':
+        # 1. 优先尝试从Ashare获取数据
+        ashare_result_df = fetch_intraday_with_ashare(code)
+        if ashare_result_df is not None:
+            # Ashare成功，直接返回其数据
+            json_output = ashare_result_df.to_json(orient='records')
+            return Response(content=json_output, media_type="application/json")
+
+        # 2. Ashare失败，回退到原来的yfinance逻辑
+        print(f"Ashare failed for {code}, falling back to yfinance.")
         try:
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
