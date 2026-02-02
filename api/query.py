@@ -36,87 +36,6 @@ class InfoResponse(BaseModel):
     roe: float | None = Field(None, description="Return on Equity")
     source: str = Field(..., description="Data source (yfinance)")
 
-# --- [新增] 用于akshare分时数据获取的辅助函数 ---
-def get_local_ticker(code: str) -> str:
-    """将股票代码转换为akshare等库可识别的本地格式（纯数字/基础代码）。"""
-    # 去除可能存在的交易所后缀，如 '.SZ'
-    if '.' in code:
-        code = code.split('.')[0]
-    # 移除市场前缀，如 'HK', 'US'
-    if code.upper().startswith(('HK', 'US')):
-        code = code[2:]
-    # 返回纯数字代码（A股）或基础代码
-    return code
-        
-def fetch_intraday_with_akshare(code: str) -> Optional[pd.DataFrame]:
-    """
-    使用akshare库获取A股/A股ETF的日内分钟数据。
-    内部完成所有格式转换，确保返回DataFrame与yfinance分支格式完全一致。
-    """
-    try:
-        import akshare as ak
-        local_code = get_local_ticker(code)  # 复用您之前的代码转换函数
-        print(f"Attempting to fetch intraday data with akshare for {local_code}")
-
-        # 1. 调用akshare接口获取数据
-        df_raw = ak.stock_zh_a_hist_min_em(
-            symbol=local_code,
-            period='1',  # 1分钟线
-            adjust='',   # 不复权
-        )
-
-        # 检查数据
-        if df_raw is None or df_raw.empty:
-            print(f"No data returned from akshare for {local_code}")
-            return None
-
-        # 2. 【核心】数据清洗与格式统一转换
-        df = df_raw.copy()
-        
-        # 2.1 列名映射：将akshare的中文列名转换为yfinance格式的英文列名
-        # 注意：请根据实际`df_raw.columns`的输出确认以下映射，这是最常见的列名
-        column_map = {
-            '时间': 'time',
-            '收盘': 'price',       # 收盘价对应yfinance的`price` (即Close)
-            '成交量': 'volume',
-        }
-        df.rename(columns=column_map, inplace=True)
-        
-        # 2.2 确保转换后存在必需的列
-        if 'price' not in df.columns or 'volume' not in df.columns:
-            print(f"Akshare data missing required columns. Actual: {df.columns.tolist()}")
-            return None
-
-        # 2.3 处理时间列：拆分为date和time，格式与yfinance完全一致
-        # akshare的‘时间’列通常是字符串，如"14:30:00"
-        df['datetime'] = pd.to_datetime(df['time'])  # 先统一转为datetime对象
-        # 提取日期（取当天日期）和时间部分
-        current_date = pd.Timestamp.now().strftime('%Y-%m-%d')
-        df['date'] = current_date  # 所有行使用同一个当前日期
-        df['time'] = df['datetime'].dt.strftime('%H:%M:%S')
-        
-        # 2.4 计算累计均价 (avg_price)，逻辑与yfinance分支保持严格一致
-        df['PriceVolume'] = df['price'] * df['volume']
-        df['CumulativeVolume'] = df['volume'].cumsum()
-        df['CumulativePriceVolume'] = df['PriceVolume'].cumsum()
-        df['avg_price'] = df['CumulativePriceVolume'] / df['CumulativeVolume']
-        
-        # 2.5 选取、排序并重命名最终输出的列，以匹配yfinance分支的输出
-        # yfinance分支返回的列顺序为: ['date', 'time', 'price', 'avg_price', 'volume']
-        result_df = df[['date', 'time', 'price', 'avg_price', 'volume']].copy()
-        
-        # 2.6 填充NaN值（与前向填充逻辑一致）
-        result_df = result_df.fillna(method='ffill')
-        
-        print(f"Successfully fetched and formatted intraday data with akshare for {local_code}")
-        return result_df
-
-    except Exception as e:
-        print(f"Akshare failed for {code}. Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
-
 # --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
     """将股票代码转换为yfinance可识别的格式"""
@@ -378,15 +297,6 @@ async def get_stock_data(
     # >>>>>>>>>>>>>>>>>>>>   唯一新增的分支逻辑，完全独立   <<<<<<<<<<<<<<<<<<<<<<<<<<<
     # ==============================================================================
     elif query_type == 'intraday':
-        # 1. 优先尝试从akshare获取数据
-        akshare_result_df = fetch_intraday_with_akshare(code)
-        if akshare_result_df is not None:
-            # 直接返回，格式已与yfinance分支完全一致
-            json_output = akshare_result_df.to_json(orient='records')
-            return Response(content=json_output, media_type="application/json")
-    
-        # 2. akshare失败，回退到yfinance
-        print(f"Akshare failed for {code}, falling back to yfinance.")
         try:
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
