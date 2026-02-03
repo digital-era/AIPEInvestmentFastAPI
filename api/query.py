@@ -103,6 +103,63 @@ def get_eastmoney_intraday(code: str):
         print("Eastmoney intraday failed:", e)
         return None
 
+def fetch_price_with_eastmoney(code: str) -> Optional[PriceResponse]:
+    """使用东方财富获取实时价格（A股 / 港股）"""
+    try:
+        code_upper = code.upper()
+
+        # ===== 生成 secid =====
+        if code_upper.startswith('HK'):
+            pure_code = code_upper.replace('HK', '')
+            secid = f"116.{pure_code}"  # 港股
+            currency = "HKD"
+        elif code.startswith(('60', '68', '51', '56', '58', '55')):
+            secid = f"1.{code}"  # 上交所
+            currency = "CNY"
+        elif code.startswith(('00', '30', '15')):
+            secid = f"0.{code}"  # 深交所
+            currency = "CNY"
+        else:
+            return None  # 美股等仍交给 yfinance
+
+        url = "https://push2.eastmoney.com/api/qt/stock/get"
+        params = {
+            "secid": secid,
+            "fields": "f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f57,f58,f60",
+            "ut": "fa5fd1943c7b386f172d6893dbfba10b"
+        }
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=3)
+        data = r.json().get("data")
+
+        if not data:
+            return None
+
+        # ===== 东方财富字段 =====
+        latest_price = data.get("f43") / 100  # 最新价
+        prev_close = data.get("f60") / 100    # 昨收
+        name = data.get("f58") or code
+
+        if not latest_price or not prev_close:
+            return None
+
+        change_amount = latest_price - prev_close
+        change_percent = (change_amount / prev_close) * 100
+
+        return PriceResponse(
+            name=name,
+            latestPrice=latest_price,
+            changePercent=change_percent,
+            changeAmount=change_amount,
+            source="eastmoney",   # ⚠️ 只是标识来源，不影响字段结构
+            currency=currency,
+            dailydata=None
+        )
+
+    except Exception as e:
+        print("Eastmoney price fetch failed:", e)
+        return None
 
 # --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
@@ -317,6 +374,17 @@ async def get_stock_data(
     Fetches stock data based on the code and query type using yfinance.
     """
     if query_type == 'price':
+        # ==============================
+        # ① 优先使用 东方财富（低延迟）
+        # ==============================
+        eastmoney_response = fetch_price_with_eastmoney(code)
+        if eastmoney_response:
+            print(f"Using Eastmoney real-time price for {code}")
+            return eastmoney_response
+
+        # ==============================
+        # ② 回退到 yfinance（兜底）
+        # ==============================
         response = fetch_price_with_yfinance(code)
         if response:
             return response
