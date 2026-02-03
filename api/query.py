@@ -9,8 +9,6 @@ import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 import os
 import requests # eastmoney增加
 
-os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
-
 app = FastAPI(
     title="Stock Query API",
     description="An API to fetch real-time price and financial info for stocks using yfinance."
@@ -380,7 +378,8 @@ async def get_stock_data(
                 )
     
             print(f"Eastmoney failed, fallback to yfinance for {code}")
-        
+            os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
+            
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
 
