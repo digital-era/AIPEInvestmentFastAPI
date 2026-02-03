@@ -46,9 +46,9 @@ def get_eastmoney_intraday(code: str):
         if code_upper.startswith('HK'):
             pure_code = code_upper.replace('HK', '')
             secid = f"116.{pure_code}"   # 港股
-        elif code.startswith(('60', '68', '51', '56', '58', '55')):
+        elif code.startswith(('60', '68', '51', '56', '58', '55', '900')):
             secid = f"1.{code}"          # 上交所
-        elif code.startswith(('00', '30', '15')):
+        elif code.startswith(('00', '30', '15', '200')):
             secid = f"0.{code}"          # 深交所
         else:
             return None
@@ -104,62 +104,75 @@ def get_eastmoney_intraday(code: str):
         return None
 
 def fetch_price_with_eastmoney(code: str) -> Optional[PriceResponse]:
-    """使用东方财富获取实时价格（A股 / 港股）"""
+    """使用东方财富获取实时价格（失败自动回落到yfinance）"""
     try:
         code_upper = code.upper()
 
-        # ===== 生成 secid =====
+        # ===== 市场识别 + secid + 价格缩放倍数 =====
         if code_upper.startswith('HK'):
             pure_code = code_upper.replace('HK', '')
-            secid = f"116.{pure_code}"  # 港股
+            secid = f"116.{pure_code}"      # 港股
             currency = "HKD"
-        elif code.startswith(('60', '68', '51', '56', '58', '55')):
-            secid = f"1.{code}"  # 上交所
+            scale = 1000                   # 港股价格字段 ÷1000
+        elif code.startswith(('60', '68', '51', '56', '58', '55', '900')):
+            secid = f"1.{code}"            # 上交所
             currency = "CNY"
-        elif code.startswith(('00', '30', '15')):
-            secid = f"0.{code}"  # 深交所
+            scale = 100                    # A股 ÷100
+        elif code.startswith(('00', '30', '15', '200')):
+            secid = f"0.{code}"            # 深交所
             currency = "CNY"
+            scale = 100
         else:
-            return None  # 美股等仍交给 yfinance
+            return None
 
         url = "https://push2.eastmoney.com/api/qt/stock/get"
         params = {
             "secid": secid,
-            "fields": "f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f57,f58,f60",
+            "fields": "f43,f44,f45,f46,f47,f48,f49,f50,f57,f58,f60",
             "ut": "fa5fd1943c7b386f172d6893dbfba10b"
         }
 
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, params=params, headers=headers, timeout=3)
-        data = r.json().get("data")
 
+        if r.status_code != 200:
+            return None
+
+        data = r.json().get("data")
         if not data:
             return None
 
-        # ===== 东方财富字段 =====
-        latest_price = data.get("f43") / 100  # 最新价
-        prev_close = data.get("f60") / 100    # 昨收
-        name = data.get("f58") or code
+        # ===== 价格字段 =====
+        latest_raw = data.get("f43")   # 最新价
+        prev_close_raw = data.get("f60")  # 昨收
 
-        if not latest_price or not prev_close:
+        if latest_raw is None or prev_close_raw is None:
             return None
 
+        latest_price = latest_raw / scale
+        prev_close = prev_close_raw / scale
+
+        # ===== 计算涨跌 =====
         change_amount = latest_price - prev_close
-        change_percent = (change_amount / prev_close) * 100
+        change_percent = (change_amount / prev_close * 100) if prev_close else 0.0
+
+        # ===== 股票名称 =====
+        name = data.get("f58") or code
 
         return PriceResponse(
             name=name,
             latestPrice=latest_price,
             changePercent=change_percent,
             changeAmount=change_amount,
-            source="eastmoney",   # ⚠️ 只是标识来源，不影响字段结构
+            source="eastmoney",
             currency=currency,
-            dailydata=None
+            dailydata=None  # 保持和原逻辑一致
         )
 
     except Exception as e:
         print("Eastmoney price fetch failed:", e)
         return None
+
 
 # --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
