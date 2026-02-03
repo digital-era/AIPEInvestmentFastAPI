@@ -9,6 +9,8 @@ import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 import os
 import requests # eastmoney增加
 
+os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
+
 app = FastAPI(
     title="Stock Query API",
     description="An API to fetch real-time price and financial info for stocks using yfinance."
@@ -38,15 +40,20 @@ class InfoResponse(BaseModel):
     source: str = Field(..., description="Data source (yfinance)")
 
 def get_eastmoney_intraday(code: str):
-    """从东方财富获取A股/ETF分时数据"""
+    """东方财富 A股 + 港股 分时"""
     try:
-        # 判断市场
-        if code.startswith(('60', '68', '51', '56', '58', '55')):
-            secid = f"1.{code}"  # 上交所
+        code_upper = code.upper()
+
+        # ===== 判断市场并生成 secid =====
+        if code_upper.startswith('HK'):
+            pure_code = code_upper.replace('HK', '').lstrip('0')
+            secid = f"116.{pure_code}"   # 港股
+        elif code.startswith(('60', '68', '51', '56', '58', '55')):
+            secid = f"1.{code}"          # 上交所
         elif code.startswith(('00', '30', '15')):
-            secid = f"0.{code}"  # 深交所
+            secid = f"0.{code}"          # 深交所
         else:
-            return None  # 非A股不走东财
+            return None
 
         url = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
         params = {
@@ -57,14 +64,12 @@ def get_eastmoney_intraday(code: str):
             "ndays": "1"
         }
 
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
 
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json()
-
         trends = data.get("data", {}).get("trends")
+
         if not trends:
             return None
 
@@ -73,24 +78,22 @@ def get_eastmoney_intraday(code: str):
         cumulative_volume = 0
 
         for item in trends:
-            # 格式: "2026-02-03 09:31,12.36,12.40,12.30,12.35,152300,188345000"
             parts = item.split(",")
 
             dt = parts[0]
-            price = float(parts[2])  # 当前价
-            volume = float(parts[5])  # 成交量（手）
-            amount = float(parts[6])  # 成交额
+            price = float(parts[2])
+            volume = float(parts[5])
+            amount = float(parts[6])
 
             cumulative_amount += amount
             cumulative_volume += volume if volume > 0 else 0
-
             avg_price = cumulative_amount / cumulative_volume if cumulative_volume else price
 
             date_str, time_str = dt.split(" ")
 
             result.append({
                 "date": date_str,
-                "time": time_str + ":00" if len(time_str) == 5 else time_str,
+                "time": time_str if len(time_str) == 8 else time_str + ":00",
                 "price": price,
                 "avg_price": avg_price,
                 "volume": volume
@@ -101,6 +104,7 @@ def get_eastmoney_intraday(code: str):
     except Exception as e:
         print("Eastmoney intraday failed:", e)
         return None
+
 
 # --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
