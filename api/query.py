@@ -7,7 +7,7 @@ import datetime
 import json
 import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 import os
-import requests //eastmoney增加
+import requests # eastmoney增加
 
 app = FastAPI(
     title="Stock Query API",
