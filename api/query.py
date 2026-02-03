@@ -46,7 +46,7 @@ def get_eastmoney_intraday(code: str):
 
         # ===== 判断市场并生成 secid =====
         if code_upper.startswith('HK'):
-            pure_code = code_upper.replace('HK', '').lstrip('0')
+            pure_code = code_upper.replace('HK', '')
             secid = f"116.{pure_code}"   # 港股
         elif code.startswith(('60', '68', '51', '56', '58', '55')):
             secid = f"1.{code}"          # 上交所
