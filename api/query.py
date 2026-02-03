@@ -7,6 +7,7 @@ import datetime
 import json
 import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 import os
+import requests //eastmoney增加
 
 app = FastAPI(
     title="Stock Query API",
@@ -35,6 +36,71 @@ class InfoResponse(BaseModel):
     pb: float | None = Field(None, description="Price-to-Book Ratio")
     roe: float | None = Field(None, description="Return on Equity")
     source: str = Field(..., description="Data source (yfinance)")
+
+def get_eastmoney_intraday(code: str):
+    """从东方财富获取A股/ETF分时数据"""
+    try:
+        # 判断市场
+        if code.startswith(('60', '68', '51', '56', '58', '55')):
+            secid = f"1.{code}"  # 上交所
+        elif code.startswith(('00', '30', '15')):
+            secid = f"0.{code}"  # 深交所
+        else:
+            return None  # 非A股不走东财
+
+        url = "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
+        params = {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6,f7,f8",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+            "ndays": "1"
+        }
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        data = r.json()
+
+        trends = data.get("data", {}).get("trends")
+        if not trends:
+            return None
+
+        result = []
+        cumulative_amount = 0
+        cumulative_volume = 0
+
+        for item in trends:
+            # 格式: "2026-02-03 09:31,12.36,12.40,12.30,12.35,152300,188345000"
+            parts = item.split(",")
+
+            dt = parts[0]
+            price = float(parts[2])  # 当前价
+            volume = float(parts[5])  # 成交量（手）
+            amount = float(parts[6])  # 成交额
+
+            cumulative_amount += amount
+            cumulative_volume += volume if volume > 0 else 0
+
+            avg_price = cumulative_amount / cumulative_volume if cumulative_volume else price
+
+            date_str, time_str = dt.split(" ")
+
+            result.append({
+                "date": date_str,
+                "time": time_str + ":00" if len(time_str) == 5 else time_str,
+                "price": price,
+                "avg_price": avg_price,
+                "volume": volume
+            })
+
+        return result
+
+    except Exception as e:
+        print("Eastmoney intraday failed:", e)
+        return None
 
 # --- Helper Function (完全保持原始状态) ---
 def get_yfinance_ticker(code: str) -> str:
@@ -298,6 +364,19 @@ async def get_stock_data(
     # ==============================================================================
     elif query_type == 'intraday':
         try:
+            # ==============================
+            # ① 优先尝试 东方财富
+            # ==============================
+            eastmoney_data = get_eastmoney_intraday(code)
+            if eastmoney_data:
+                print(f"Using Eastmoney intraday data for {code}")
+                return Response(
+                    content=json.dumps(eastmoney_data),
+                    media_type="application/json"
+                )
+    
+            print(f"Eastmoney failed, fallback to yfinance for {code}")
+        
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
 
