@@ -7,7 +7,6 @@ import datetime
 import json
 import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 import os
-os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
 import requests # eastmoney增加
 
 app = FastAPI(
@@ -37,103 +36,6 @@ class InfoResponse(BaseModel):
     pb: float | None = Field(None, description="Price-to-Book Ratio")
     roe: float | None = Field(None, description="Return on Equity")
     source: str = Field(..., description="Data source (yfinance)")
-
-# ========== 新增：Tushare 分时数据获取 ==========
-def get_tushare_intraday(code: str) -> Optional[List[dict]]:
-    """
-    使用 Tushare 新接口 rt_min 获取当日分钟数据，返回格式与 yfinance 完全一致。
-    失败返回 None，自动从环境变量读取 TUSHARE_TOKEN。
-    """
-    try:
-        import tushare as ts
-    except ImportError:
-        print("Tushare not installed, skip.")
-        return None
-
-    token = os.environ.get("TUSHARE_TOKEN")
-    if not token:
-        print("TUSHARE_TOKEN not set, skip.")
-        return None
-
-    ts.set_token(token)
-    pro = ts.pro_api()
-
-    # 将输入 code 转换为 Tushare 可识别的 ts_code
-    code_upper = code.upper()
-    ts_code = None
-
-    if code_upper.startswith('HK'):
-        # 港股：补零至5位 + .HK
-        pure = code[2:]  # 如 '02899' 或 '00005'
-        pure_padded = pure.zfill(5)
-        ts_code = f"{pure_padded}.HK"
-    elif code_upper.startswith('US'):
-        # 美股 Tushare 不支持分钟数据
-        return None
-    else:
-        # A股 / 基金
-        if code.startswith(('60', '68', '900')):          # 沪市
-            ts_code = f"{code}.SH"
-        elif code.startswith(('00', '30', '200')):        # 深市
-            ts_code = f"{code}.SZ"
-        elif code.startswith(('43', '83', '87', '88')):    # 北交所
-            ts_code = f"{code}.BJ"
-        elif code.startswith(('58', '56', '55', '51')):    # 上证 ETF
-            ts_code = f"{code}.SH"
-        elif code.startswith(('15')):                      # 深证 ETF
-            ts_code = f"{code}.SZ"
-        else:
-            return None
-
-    if ts_code is None:
-        return None
-
-    # 获取当日1分钟数据
-    try:
-        # rt_min 接口：freq 必选，'1MIN'（大写），ts_code 支持单个或多个
-        df = pro.rt_min(ts_code=ts_code, freq='1MIN')
-    except Exception as e:
-        print(f"Tushare rt_min failed for {ts_code}: {e}")
-        return None
-
-    if df is None or df.empty:
-        return None
-
-    # 按时间升序排列
-    df = df.sort_values('time')
-
-    # 将time列转换为datetime类型，并提取日期和时间
-    df['datetime'] = pd.to_datetime(df['time'])
-    df['date'] = df['datetime'].dt.strftime('%Y-%m-%d')
-    df['time_only'] = df['datetime'].dt.strftime('%H:%M:%S')
-
-    # 计算累计均价（VWAP）
-    df['cum_amount'] = df['amount'].cumsum()
-    df['cum_volume'] = df['vol'].cumsum()
-    df['avg_price'] = df['cum_amount'] / df['cum_volume']
-
-    # 构造返回列表
-    result = []
-    for _, row in df.iterrows():
-        # avg_price 可能为 NaN（如第一分钟无成交），后续统一填充
-        avg_price = row['avg_price'] if pd.notna(row['avg_price']) else None
-
-        result.append({
-            "date": row['date'],
-            "time": row['time_only'],
-            "price": float(row['close']),
-            "avg_price": avg_price,
-            "volume": int(row['vol'])
-        })
-
-    # 对 avg_price 前向填充（处理可能的第一分钟无成交情况）
-    if result:
-        df_res = pd.DataFrame(result)
-        df_res['avg_price'] = df_res['avg_price'].fillna(method='ffill')
-        result = df_res.to_dict(orient='records')
-
-    return result
-# ========== 新增结束 ==========
 
 def get_eastmoney_intraday(code: str):
     """东方财富 A股 + 港股 分时"""
@@ -545,16 +447,8 @@ async def get_stock_data(
     # ==============================================================================
     elif query_type == 'intraday':
         try:
-            # ① 优先尝试 Tushare
-            tushare_data = get_tushare_intraday(code)
-            if tushare_data:
-                print(f"Using Tushare intraday data for {code}")
-                return Response(
-                    content=json.dumps(tushare_data),
-                    media_type="application/json"
-                )
             # ==============================
-            # ② 其次尝试 东方财富
+            # ① 优先尝试 东方财富
             # ==============================
             eastmoney_data = get_eastmoney_intraday(code)
             if eastmoney_data:
@@ -563,8 +457,9 @@ async def get_stock_data(
                     content=json.dumps(eastmoney_data),
                     media_type="application/json"
                 )
-            # ③ 最后回退 yfinance
-            print(f"Tushare and Eastmoney failed, fallback to yfinance for {code}")
+    
+            print(f"Eastmoney failed, fallback to yfinance for {code}")
+            os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
             
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
