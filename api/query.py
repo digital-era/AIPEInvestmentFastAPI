@@ -7,6 +7,7 @@ import datetime
 import json
 import pandas as pd # 唯一新增的导入，因为分时数据处理需要它
 import os
+os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
 import requests # eastmoney增加
 
 app = FastAPI(
@@ -40,7 +41,7 @@ class InfoResponse(BaseModel):
 # ========== 新增：Tushare 分时数据获取 ==========
 def get_tushare_intraday(code: str) -> Optional[List[dict]]:
     """
-    使用 Tushare 获取当日分钟数据，返回格式与 yfinance 完全一致。
+    使用 Tushare 新接口 rt_min 获取当日分钟数据，返回格式与 yfinance 完全一致。
     失败返回 None，自动从环境变量读取 TUSHARE_TOKEN。
     """
     try:
@@ -87,19 +88,24 @@ def get_tushare_intraday(code: str) -> Optional[List[dict]]:
     if ts_code is None:
         return None
 
-    # 获取当日分钟数据
-    today = datetime.datetime.now().strftime('%Y%m%d')
+    # 获取当日1分钟数据
     try:
-        df = pro.minute(ts_code=ts_code, date=today, freq='1min')
+        # rt_min 接口：freq 必选，'1MIN'（大写），ts_code 支持单个或多个
+        df = pro.rt_min(ts_code=ts_code, freq='1MIN')
     except Exception as e:
-        print(f"Tushare minute data failed for {ts_code}: {e}")
+        print(f"Tushare rt_min failed for {ts_code}: {e}")
         return None
 
     if df is None or df.empty:
         return None
 
-    # 按时间升序
+    # 按时间升序排列
     df = df.sort_values('time')
+
+    # 将time列转换为datetime类型，并提取日期和时间
+    df['datetime'] = pd.to_datetime(df['time'])
+    df['date'] = df['datetime'].dt.strftime('%Y-%m-%d')
+    df['time_only'] = df['datetime'].dt.strftime('%H:%M:%S')
 
     # 计算累计均价（VWAP）
     df['cum_amount'] = df['amount'].cumsum()
@@ -109,22 +115,12 @@ def get_tushare_intraday(code: str) -> Optional[List[dict]]:
     # 构造返回列表
     result = []
     for _, row in df.iterrows():
-        # 时间格式统一为 HH:MM:SS
-        time_raw = row['time']
-        if len(time_raw) == 6 and time_raw.isdigit():
-            time_fmt = f"{time_raw[:2]}:{time_raw[2:4]}:{time_raw[4:6]}"
-        else:
-            time_fmt = time_raw  # 可能已经是 HH:MM:SS
-
-        # 日期格式 YYYY-MM-DD
-        date_fmt = f"{today[:4]}-{today[4:6]}-{today[6:8]}"
-
         # avg_price 可能为 NaN（如第一分钟无成交），后续统一填充
         avg_price = row['avg_price'] if pd.notna(row['avg_price']) else None
 
         result.append({
-            "date": date_fmt,
-            "time": time_fmt,
+            "date": row['date'],
+            "time": row['time_only'],
             "price": float(row['close']),
             "avg_price": avg_price,
             "volume": int(row['vol'])
@@ -569,7 +565,6 @@ async def get_stock_data(
                 )
             # ③ 最后回退 yfinance
             print(f"Tushare and Eastmoney failed, fallback to yfinance for {code}")
-            os.environ["YFINANCE_TZ_CACHE"] = "/tmp"
             
             ticker_symbol = get_yfinance_ticker(code)
             ticker = yf.Ticker(ticker_symbol)
